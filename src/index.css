@@ -1,0 +1,42 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-primary: #1e40af;
+  --color-secondary: #64748b;
+  --color-accent: #10b981;
+}
+
+@layer base {
+  body {
+    @apply font-sans bg-slate-50 text-slate-900;
+  }
+}
+
+.mcmix-sidebar-item {
+  @apply flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 cursor-pointer;
+}
+
+.mcmix-sidebar-item.active {
+  @apply bg-primary text-white shadow-md;
+}
+
+.mcmix-sidebar-item:not(.active):hover {
+  @apply bg-slate-200;
+}
+
+.card {
+  @apply bg-white rounded-xl border border-slate-200 shadow-sm p-6;
+}
+
+.btn-primary {
+  @apply bg-primary text-white px-4 py-2 rounded-lg font-medium hover:bg-blue-800 transition-colors shadow-sm disabled:opacity-50;
+}
+
+.btn-secondary {
+  @apply bg-white text-slate-700 border border-slate-300 px-4 py-2 rounded-lg font-medium hover:bg-slate-50 transition-colors shadow-sm;
+}
+
