@@ -49,7 +49,12 @@ import {
   MathRoundBrackets,
   MathCurlyBrackets,
   MathSquareBrackets,
-  MathComponent
+  MathComponent,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  BorderStyle
 } from 'docx';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
@@ -1173,16 +1178,16 @@ export default function App() {
   });
 
   const [partLabels, setPartLabels] = useState({
-    part1: "PHẦN I. Thí sinh trả lời từ câu 1 đến câu 18. Mỗi câu chỉ chọn một phương án.",
-    part2: "PHẦN II. Thí sinh trả lời từ câu 1 đến câu 4. Mỗi câu có các ý a), b), c), d; thí sinh đánh dấu Đúng hoặc Sai cho từng ý.",
-    part3: "PHẦN III. Thí sinh trả lời từ câu 1 đến câu 6. Mỗi câu trả lời đúng được 0,25 điểm."
+    part1: "PHẦN I. Thí sinh trả lời từ câu 1 đến câu 18. Mỗi câu hỏi thí sinh chỉ chọn một phương án.",
+    part2: "PHẦN II. Thí sinh trả lời từ câu 1 đến câu 4. Trong mỗi ý a), b), c), d) ở mỗi câu, thí sinh chọn đúng hoặc sai.",
+    part3: "PHẦN III. Thí sinh trả lời từ câu 1 đến câu 6. Mỗi câu trả lời đúng thí sinh được 0,25 điểm."
   });
 
   useEffect(() => {
     setPartLabels({
-      part1: `PHẦN I. Thí sinh trả lời từ câu 1 đến câu ${structure.part1_count}. Mỗi câu chỉ chọn một phương án.`,
-      part2: `PHẦN II. Thí sinh trả lời từ câu 1 đến câu ${structure.part2_count}. Mỗi câu có các ý a), b), c), d; thí sinh đánh dấu Đúng hoặc Sai cho từng ý.`,
-      part3: `PHẦN III. Thí sinh trả lời từ câu 1 đến câu ${structure.part3_count}. Mỗi câu trả lời đúng được 0,25 điểm.`
+      part1: `PHẦN I. Thí sinh trả lời từ câu 1 đến câu ${structure.part1_count}. Mỗi câu hỏi thí sinh chỉ chọn một phương án.`,
+      part2: `PHẦN II. Thí sinh trả lời từ câu 1 đến câu ${structure.part2_count}. Trong mỗi ý a), b), c), d) ở mỗi câu, thí sinh chọn đúng hoặc sai.`,
+      part3: `PHẦN III. Thí sinh trả lời từ câu 1 đến câu ${structure.part3_count}. Mỗi câu trả lời đúng thí sinh được 0,25 điểm.`
     });
   }, [structure.part1_count, structure.part2_count, structure.part3_count]);
 
@@ -1852,7 +1857,7 @@ export default function App() {
     const html = ensureMathAssetsRendered(q.content || '');
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
-    const paragraphs: Paragraph[] = [];
+    const paragraphs: any[] = [];
     let currentRuns: any[] = [];
     let isFirst = true;
 
@@ -1957,6 +1962,157 @@ export default function App() {
     return paragraphs;
   };
 
+  const renderOptionsDocx = (optA: string, optB: string, optC: string, optD: string, imageMap: Map<string, Uint8Array>) => {
+    const runsA = [new TextRun({ text: "A. ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optA), imageMap)];
+    const runsB = [new TextRun({ text: "B. ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optB), imageMap)];
+    const runsC = [new TextRun({ text: "C. ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optC), imageMap)];
+    const runsD = [new TextRun({ text: "D. ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optD), imageMap)];
+
+    const layout = getOptionLayout(optA, optB, optC, optD);
+
+    const cellBorders = {
+      top: { style: BorderStyle.NONE, size: 0, color: "auto" },
+      bottom: { style: BorderStyle.NONE, size: 0, color: "auto" },
+      left: { style: BorderStyle.NONE, size: 0, color: "auto" },
+      right: { style: BorderStyle.NONE, size: 0, color: "auto" },
+    };
+
+    if (layout === 1) {
+      return new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        alignment: AlignmentType.CENTER,
+        borders: {
+          top: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          bottom: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          left: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          right: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          insideHorizontal: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          insideVertical: { style: BorderStyle.NONE, size: 0, color: "auto" },
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 25, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsA, indent: { left: 240 }, spacing: { before: 80, after: 120 } })],
+              }),
+              new TableCell({
+                width: { size: 25, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsB, indent: { left: 240 }, spacing: { before: 80, after: 120 } })],
+              }),
+              new TableCell({
+                width: { size: 25, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsC, indent: { left: 240 }, spacing: { before: 80, after: 120 } })],
+              }),
+              new TableCell({
+                width: { size: 25, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsD, indent: { left: 240 }, spacing: { before: 80, after: 120 } })],
+              }),
+            ],
+          }),
+        ],
+      });
+    } else if (layout === 2) {
+      return new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        alignment: AlignmentType.CENTER,
+        borders: {
+          top: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          bottom: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          left: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          right: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          insideHorizontal: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          insideVertical: { style: BorderStyle.NONE, size: 0, color: "auto" },
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsA, indent: { left: 240 }, spacing: { before: 60, after: 60 } })],
+              }),
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsB, indent: { left: 240 }, spacing: { before: 60, after: 60 } })],
+              }),
+            ],
+          }),
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsC, indent: { left: 240 }, spacing: { before: 60, after: 120 } })],
+              }),
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsD, indent: { left: 240 }, spacing: { before: 60, after: 120 } })],
+              }),
+            ],
+          }),
+        ],
+      });
+    } else {
+      return new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        alignment: AlignmentType.CENTER,
+        borders: {
+          top: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          bottom: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          left: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          right: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          insideHorizontal: { style: BorderStyle.NONE, size: 0, color: "auto" },
+          insideVertical: { style: BorderStyle.NONE, size: 0, color: "auto" },
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsA, indent: { left: 240 }, spacing: { before: 40, after: 40 } })],
+              }),
+            ],
+          }),
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsB, indent: { left: 240 }, spacing: { before: 40, after: 40 } })],
+              }),
+            ],
+          }),
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsC, indent: { left: 240 }, spacing: { before: 40, after: 40 } })],
+              }),
+            ],
+          }),
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                borders: cellBorders,
+                children: [new Paragraph({ children: runsD, indent: { left: 240 }, spacing: { before: 40, after: 80 } })],
+              }),
+            ],
+          }),
+        ],
+      });
+    }
+  };
+
   const exportToWord = async (exam: GeneratedExam) => {
     // Pre-fetch all images
     const allUrls = getAllImageUrls(exam);
@@ -2048,19 +2204,7 @@ export default function App() {
               ? q.shuffled_options.find(o => o.label === 'D')?.text || ''
               : q.option_d || '';
 
-            paragraphs.push(new Paragraph({
-              children: [
-                new TextRun({ text: "A. " }),
-                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optA), imageMap),
-                new TextRun({ text: "\t\tB. " }),
-                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optB), imageMap),
-                new TextRun({ text: "\t\tC. " }),
-                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optC), imageMap),
-                new TextRun({ text: "\t\tD. " }),
-                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optD), imageMap),
-              ],
-              indent: { left: 360 },
-            }));
+            paragraphs.push(renderOptionsDocx(optA, optB, optC, optD, imageMap));
 
             return paragraphs;
           }),
@@ -2075,10 +2219,10 @@ export default function App() {
           ...exam.part2.flatMap((q, idx) => {
             const paragraphs = renderQuestionContentDocx(q, `Câu ${idx + 1}. `, imageMap);
 
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "a) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_a), imageMap)], indent: { left: 360 } }));
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "b) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_b), imageMap)], indent: { left: 360 } }));
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "c) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_c), imageMap)], indent: { left: 360 } }));
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "d) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_d), imageMap)], indent: { left: 360 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "a) ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_a), imageMap)], indent: { left: 360 }, spacing: { after: 60 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "b) ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_b), imageMap)], indent: { left: 360 }, spacing: { after: 60 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "c) ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_c), imageMap)], indent: { left: 360 }, spacing: { after: 60 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "d) ", bold: true }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_d), imageMap)], indent: { left: 360 }, spacing: { after: 120 } }));
 
             return paragraphs;
           }),
@@ -2247,6 +2391,47 @@ export default function App() {
     return convertTexDelimiters(doc.body.textContent || "");
   };
 
+  const getOptionLayout = (a: string, b: string, c: string, d: string): 1 | 2 | 4 => {
+    const cleanA = stripHtml(a).trim();
+    const cleanB = stripHtml(b).trim();
+    const cleanC = stripHtml(c).trim();
+    const cleanD = stripHtml(d).trim();
+    
+    const lenA = cleanA.length;
+    const lenB = cleanB.length;
+    const lenC = cleanC.length;
+    const lenD = cleanD.length;
+    
+    const maxLength = Math.max(lenA, lenB, lenC, lenD);
+    const totalLength = lenA + lenB + lenC + lenD;
+    
+    const hasComplexMath = [a, b, c, d].some(opt => 
+      opt.includes('class="ql-formula"') || 
+      opt.includes('class="inline-math-asset"') || 
+      opt.includes('[!m:') ||
+      opt.includes('<img') ||
+      opt.includes('math-assets')
+    );
+    
+    if (hasComplexMath) {
+      if (maxLength > 20) {
+        return 4;
+      } else if (maxLength > 8) {
+        return 2;
+      } else {
+        return 1;
+      }
+    }
+
+    if (maxLength > 30 || totalLength > 75) {
+      return 4;
+    } else if (maxLength > 12 || totalLength > 40) {
+      return 2;
+    } else {
+      return 1;
+    }
+  };
+
   const renderQuestionContentPdf = (doc: jsPDF, q: Question, prefix: string, imageMap: Map<string, string>, startY: number, pageWidth: number) => {
     const html = ensureMathAssetsRendered(q.content || '');
     const parser = new DOMParser();
@@ -2367,9 +2552,37 @@ export default function App() {
         ? q.shuffled_options.find(o => o.label === 'D')?.text || ''
         : q.option_d || '';
 
-      const options = `A. ${removeAccents(stripHtml(optA))}   B. ${removeAccents(stripHtml(optB))}   C. ${removeAccents(stripHtml(optC))}   D. ${removeAccents(stripHtml(optD))}`;
-      doc.text(options, 35, y);
-      y += 10;
+      const layout = getOptionLayout(optA, optB, optC, optD);
+      const optA_text = `A. ${removeAccents(stripHtml(optA))}`;
+      const optB_text = `B. ${removeAccents(stripHtml(optB))}`;
+      const optC_text = `C. ${removeAccents(stripHtml(optC))}`;
+      const optD_text = `D. ${removeAccents(stripHtml(optD))}`;
+
+      if (layout === 1) {
+        if (y > 275) { doc.addPage(); y = 20; }
+        doc.text(optA_text, 25, y);
+        doc.text(optB_text, 70, y);
+        doc.text(optC_text, 115, y);
+        doc.text(optD_text, 160, y);
+        y += 8;
+      } else if (layout === 2) {
+        if (y > 270) { doc.addPage(); y = 20; }
+        doc.text(optA_text, 25, y);
+        doc.text(optB_text, 110, y);
+        y += 6;
+        if (y > 275) { doc.addPage(); y = 20; }
+        doc.text(optC_text, 25, y);
+        doc.text(optD_text, 110, y);
+        y += 8;
+      } else {
+        const subOpts = [optA_text, optB_text, optC_text, optD_text];
+        for (let j = 0; j < subOpts.length; j++) {
+          if (y > 275) { doc.addPage(); y = 20; }
+          const lines = doc.splitTextToSize(subOpts[j], pageWidth - 35);
+          doc.text(lines, 25, y);
+          y += (lines.length * 6) + (j === 3 ? 4 : 1);
+        }
+      }
     }
 
     // Part II
@@ -2383,10 +2596,22 @@ export default function App() {
       if (y > 230) { doc.addPage(); y = 20; }
       y = renderQuestionContentPdf(doc, q, `Cau ${i + 1}: `, imageMap, y, pageWidth);
       
-      doc.text(`a) ${removeAccents(stripHtml(q.option_a))}`, 40, y); y += 6;
-      doc.text(`b) ${removeAccents(stripHtml(q.option_b))}`, 40, y); y += 6;
-      doc.text(`c) ${removeAccents(stripHtml(q.option_c))}`, 40, y); y += 6;
-      doc.text(`d) ${removeAccents(stripHtml(q.option_d))}`, 40, y); y += 8;
+      const subopts = [
+        { label: 'a)', text: removeAccents(stripHtml(q.option_a)) },
+        { label: 'b)', text: removeAccents(stripHtml(q.option_b)) },
+        { label: 'c)', text: removeAccents(stripHtml(q.option_c)) },
+        { label: 'd)', text: removeAccents(stripHtml(q.option_d)) },
+      ];
+      for (let j = 0; j < subopts.length; j++) {
+        if (y > 275) { doc.addPage(); y = 20; }
+        doc.setFont("helvetica", "bold");
+        doc.text(subopts[j].label, 25, y);
+        doc.setFont("helvetica", "normal");
+        
+        const lines = doc.splitTextToSize(subopts[j].text, pageWidth - 35);
+        doc.text(lines, 32, y);
+        y += (lines.length * 6) + (j === 3 ? 4 : 1);
+      }
     }
 
     // Part III
