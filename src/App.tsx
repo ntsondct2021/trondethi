@@ -23,15 +23,1087 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
+import JSZip from 'jszip';
 import { Question, QuestionType, ExamStructure, GeneratedExam } from './types';
 import { mixExams } from './randomizer';
 import { saveAs } from 'file-saver';
 import { generateQuestionsWithAI } from './services/gemini';
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, ImageRun, Header, Footer, PageNumber } from 'docx';
+import { 
+  Document, 
+  Packer, 
+  Paragraph, 
+  TextRun, 
+  AlignmentType, 
+  HeadingLevel, 
+  ImageRun, 
+  Header, 
+  Footer, 
+  PageNumber,
+  Math as DocxMath,
+  MathRun,
+  MathFraction,
+  MathSuperScript,
+  MathSubScript,
+  MathSubSuperScript,
+  MathRadical,
+  MathRoundBrackets,
+  MathCurlyBrackets,
+  MathSquareBrackets,
+  MathComponent
+} from 'docx';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 import ReactQuill from 'react-quill-new';
 import 'react-quill-new/dist/quill.snow.css';
+
+// --- OMML & MathType to LaTeX Helpers for Word Import ---
+
+interface Token {
+  type: 'LBRACE' | 'RBRACE' | 'LBRACKET' | 'RBRACKET' | 'LPAREN' | 'RPAREN' | 'SUB' | 'SUP' | 'CMD' | 'TEXT';
+  value: string;
+}
+
+const findChildByLocalName = (node: Node, localName: string): Element | null => {
+  for (let i = 0; i < node.childNodes.length; i++) {
+    const child = node.childNodes[i];
+    if (child.nodeType === Node.ELEMENT_NODE && (child as Element).localName === localName) {
+      return child as Element;
+    }
+  }
+  return null;
+};
+
+const convertOmmlNodeToLatex = (node: Node): string => {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent || '';
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return '';
+  }
+
+  const el = node as Element;
+  const name = el.localName;
+
+  const getChildContent = (childName: string): string => {
+    const child = findChildByLocalName(el, childName);
+    return child ? convertOmmlNodeToLatex(child) : '';
+  };
+
+  const getChildrenContent = (element: Element): string => {
+    let res = '';
+    for (let i = 0; i < element.childNodes.length; i++) {
+      res += convertOmmlNodeToLatex(element.childNodes[i]);
+    }
+    return res;
+  };
+
+  switch (name) {
+    case 't':
+      return el.textContent || '';
+    case 'r':
+    case 'oMath':
+    case 'oMathPara':
+    case 'e':
+    case 'lim':
+    case 'num':
+    case 'den':
+    case 'sub':
+    case 'sup':
+    case 'deg':
+      return getChildrenContent(el);
+
+    case 'f': {
+      const numStr = getChildContent('num');
+      const denStr = getChildContent('den');
+      return `\\frac{${numStr}}{${denStr}}`;
+    }
+
+    case 'sSup': {
+      const baseStr = getChildContent('e');
+      const supStr = getChildContent('sup');
+      return `{${baseStr}}^{${supStr}}`;
+    }
+
+    case 'sSub': {
+      const baseStr = getChildContent('e');
+      const subStr = getChildContent('sub');
+      return `{${baseStr}}_{${subStr}}`;
+    }
+
+    case 'sSubSup': {
+      const baseStr = getChildContent('e');
+      const subStr = getChildContent('sub');
+      const supStr = getChildContent('sup');
+      return `{${baseStr}}_{${subStr}}^{${supStr}}`;
+    }
+
+    case 'rad': {
+      const baseStr = getChildContent('e');
+      const degStr = getChildContent('deg');
+      if (degStr.trim()) {
+        return `\\sqrt[${degStr}]{${baseStr}}`;
+      }
+      return `\\sqrt{${baseStr}}`;
+    }
+
+    case 'd': {
+      const eStr = getChildContent('e');
+      let begChr = '(';
+      let endChr = ')';
+      
+      const dPr = findChildByLocalName(el, 'dPr');
+      if (dPr) {
+        const begChrEl = findChildByLocalName(dPr, 'begChr');
+        const endChrEl = findChildByLocalName(dPr, 'endChr');
+        if (begChrEl) begChr = begChrEl.getAttribute('val') || '(';
+        if (endChrEl) endChr = endChrEl.getAttribute('val') || ')';
+      }
+
+      if (begChr === '{') begChr = '\\{';
+      if (endChr === '}') endChr = '\\}';
+
+      return `\\left${begChr}${eStr}\\right${endChr}`;
+    }
+
+    case 'nary': {
+      const eStr = getChildContent('e');
+      const subStr = getChildContent('sub');
+      const supStr = getChildContent('sup');
+      
+      let op = '\\sum';
+      const naryPr = findChildByLocalName(el, 'naryPr');
+      if (naryPr) {
+        const chrEl = findChildByLocalName(naryPr, 'chr');
+        if (chrEl) {
+          const charVal = chrEl.getAttribute('val') || '∑';
+          if (charVal === '∫' || charVal === 'int') op = '\\int';
+          else if (charVal === '∏' || charVal === 'prod') op = '\\prod';
+        }
+      }
+
+      let limits = '';
+      if (subStr.trim()) limits += `_{${subStr}}`;
+      if (supStr.trim()) limits += `^{${supStr}}`;
+      
+      return `${op}${limits}{${eStr}}`;
+    }
+
+    case 'limLow': {
+      const baseStr = getChildContent('e');
+      const limStr = getChildContent('lim');
+      return `{${baseStr}}_{${limStr}}`;
+    }
+
+    case 'limUpp': {
+      const baseStr = getChildContent('e');
+      const limStr = getChildContent('lim');
+      return `{${baseStr}}^{${limStr}}`;
+    }
+
+    case 'm': {
+      let rowsStr = '';
+      const rows: Element[] = [];
+      for (let i = 0; i < el.childNodes.length; i++) {
+        const child = el.childNodes[i];
+        if (child.nodeType === Node.ELEMENT_NODE && (child as Element).localName === 'mr') {
+          rows.push(child as Element);
+        }
+      }
+      
+      const rowLatex = rows.map(row => {
+        const cells: Element[] = [];
+        for (let j = 0; j < row.childNodes.length; j++) {
+          const child2 = row.childNodes[j];
+          if (child2.nodeType === Node.ELEMENT_NODE && (child2 as Element).localName === 'e') {
+            cells.push(child2 as Element);
+          }
+        }
+        return cells.map(cell => convertOmmlNodeToLatex(cell)).join(' & ');
+      }).join(' \\\\ ');
+
+      return `\\begin{matrix}${rowLatex}\\end{matrix}`;
+    }
+
+    default:
+      return getChildrenContent(el);
+  }
+};
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer | Uint8Array): string => {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+};
+
+const base64ToUint8Array = (base64: string): Uint8Array => {
+  const binaryString = window.atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const preprocessDocx = async (arrayBuffer: ArrayBuffer): Promise<ArrayBuffer> => {
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  const documentXmlText = await zip.file("word/document.xml")?.async("string");
+  if (!documentXmlText) return arrayBuffer;
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(documentXmlText, "application/xml");
+
+  const relsXmlText = await zip.file("word/_rels/document.xml.rels")?.async("string");
+  const relsMap = new Map<string, string>();
+  if (relsXmlText) {
+    const relsDoc = parser.parseFromString(relsXmlText, "application/xml");
+    const rels = relsDoc.getElementsByTagName("Relationship");
+    for (let i = 0; i < rels.length; i++) {
+      const rel = rels[i];
+      const id = rel.getAttribute("Id");
+      const target = rel.getAttribute("Target");
+      if (id && target) {
+        relsMap.set(id, target.startsWith("word/") ? target : `word/${target}`);
+      }
+    }
+  }
+
+  const mathAssets: any[] = [];
+  let mathCounter = 1;
+  const batchId = Date.now() + "_" + Math.floor(Math.random() * 1000);
+
+  let modified = false;
+
+  // 1. Process standard oMath elements (Office Math)
+  const oMathNodes: Element[] = [];
+  const allElements = doc.getElementsByTagName("*");
+  for (let i = 0; i < allElements.length; i++) {
+    const el = allElements[i];
+    if (el.localName === 'oMath') {
+      oMathNodes.push(el);
+    }
+  }
+
+  for (let i = oMathNodes.length - 1; i >= 0; i--) {
+    const oMath = oMathNodes[i];
+    let parent = oMath.parentNode;
+    let isNested = false;
+    while (parent) {
+      if ((parent as Element).localName === 'oMath') {
+        isNested = true;
+        break;
+      }
+      parent = parent.parentNode;
+    }
+    if (isNested) continue;
+
+    // Check if oMath is wrapped in an OLE object (MathType). If so, let OLE object parsing handle it.
+    let isWrappedInObject = false;
+    let p = oMath.parentNode;
+    while (p) {
+      if ((p as Element).localName === 'object' || (p as Element).localName === 'objectPr') {
+        isWrappedInObject = true;
+        break;
+      }
+      p = p.parentNode;
+    }
+    if (isWrappedInObject) continue;
+
+    const latex = convertOmmlNodeToLatex(oMath);
+    const originalXml = new XMLSerializer().serializeToString(oMath);
+    const id = `mathtype_${batchId}_om_${mathCounter++}`;
+
+    mathAssets.push({
+      id,
+      originalXml,
+      latexFallback: latex || ""
+    });
+
+    const wNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const rElement = doc.createElementNS(wNamespace, "w:r");
+    const tElement = doc.createElementNS(wNamespace, "w:t");
+    tElement.textContent = `[!m:${id}]`;
+    rElement.appendChild(tElement);
+
+    oMath.parentNode?.replaceChild(rElement, oMath);
+    modified = true;
+  }
+
+  // 2. Process OLE Objects and Shapes (MathType elements)
+  const objectNodes: Element[] = [];
+  for (let i = 0; i < allElements.length; i++) {
+    const el = allElements[i];
+    if (el.localName === 'object') {
+      objectNodes.push(el);
+    }
+  }
+
+  for (let i = objectNodes.length - 1; i >= 0; i--) {
+    const node = objectNodes[i];
+    
+    // Seek OLE details
+    const oleObj = node.getElementsByTagName("o:OLEObject")[0] || node.querySelector("OLEObject");
+    if (!oleObj) continue;
+
+    const oleRelId = oleObj.getAttribute("r:id") || oleObj.getAttribute("id");
+    if (!oleRelId) continue;
+
+    const oleTargetPath = relsMap.get(oleRelId);
+    if (!oleTargetPath) continue;
+
+    // Seek Image Details
+    const imagedata = node.getElementsByTagName("v:imagedata")[0] || node.querySelector("imagedata");
+    let imgRelId = imagedata ? (imagedata.getAttribute("r:id") || imagedata.getAttribute("id")) : null;
+    let imgTargetPath = imgRelId ? relsMap.get(imgRelId) : null;
+
+    let oleBinBase64 = "";
+    const oleFile = zip.file(oleTargetPath);
+    if (oleFile) {
+      const bytes = await oleFile.async("uint8array");
+      oleBinBase64 = arrayBufferToBase64(bytes);
+    }
+
+    let imageBinBase64 = "";
+    let imageExt = "png";
+    if (imgTargetPath) {
+      const imgFile = zip.file(imgTargetPath);
+      if (imgFile) {
+        const bytes = await imgFile.async("uint8array");
+        imageBinBase64 = arrayBufferToBase64(bytes);
+        imageExt = imgTargetPath.split('.').pop() || "png";
+      }
+    }
+
+    // Extract LaTeX fallback from shape alt/descr/title
+    let latexFallback = "";
+    const alt = node.getAttribute('alt') || node.getAttribute('descr') || node.getAttribute('title');
+    const shape = node.getElementsByTagName("v:shape")[0] || node.querySelector("shape");
+    const shapeAlt = shape ? (shape.getAttribute('alt') || shape.getAttribute('descr') || shape.getAttribute('o:title') || shape.getAttribute('title')) : '';
+    const desc = alt || shapeAlt || '';
+    if (desc.includes('MathType LaTeX Equation:')) {
+      latexFallback = desc.split('MathType LaTeX Equation:')[1].trim();
+    } else if (desc.includes('Equation:')) {
+      latexFallback = desc.split('Equation:')[1].trim();
+    } else if (desc.startsWith('$') && desc.endsWith('$')) {
+      latexFallback = desc.slice(1, -1).trim();
+    }
+
+    const originalXml = new XMLSerializer().serializeToString(node);
+    const id = `mathtype_${batchId}_ole_${mathCounter++}`;
+
+    mathAssets.push({
+      id,
+      originalXml,
+      oleBinBase64,
+      imageBinBase64,
+      imageExt,
+      latexFallback
+    });
+
+    // Find the outermore run context target to replace
+    let targetToReplace: Node = node;
+    let parent = node.parentNode;
+    while (parent) {
+      const name = (parent as Element).localName || parent.nodeName;
+      if (name === 'r' || name === 'drawing' || name === 'object') {
+        targetToReplace = parent;
+      }
+      parent = parent.parentNode;
+    }
+
+    const wNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const rElement = doc.createElementNS(wNamespace, "w:r");
+    const tElement = doc.createElementNS(wNamespace, "w:t");
+    tElement.textContent = `[!m:${id}]`;
+    rElement.appendChild(tElement);
+
+    targetToReplace.parentNode?.replaceChild(rElement, targetToReplace);
+    modified = true;
+  }
+
+  // 3. Process drawings (standard drawings/images)
+  const drawingNodes: Element[] = [];
+  const currentElements3 = doc.getElementsByTagName("*");
+  for (let i = 0; i < currentElements3.length; i++) {
+    const el = currentElements3[i];
+    if (el.localName === 'drawing') {
+      drawingNodes.push(el);
+    }
+  }
+
+  for (let i = drawingNodes.length - 1; i >= 0; i--) {
+    const drawing = drawingNodes[i];
+    if (!doc.contains(drawing)) continue;
+
+    let isWrappedInObject = false;
+    let p = drawing.parentNode;
+    while (p) {
+      const name = (p as Element).localName || p.nodeName;
+      if (name === 'object' || name === 'objectPr') {
+        isWrappedInObject = true;
+        break;
+      }
+      p = p.parentNode;
+    }
+    if (isWrappedInObject) continue;
+
+    const blips = drawing.getElementsByTagNameNS("http://schemas.openxmlformats.org/drawingml/2006/main", "blip");
+    let embedId = null;
+    if (blips && blips.length > 0) {
+      embedId = blips[0].getAttribute("r:embed") || blips[0].getAttribute("embed") || blips[0].getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "embed");
+    } else {
+      const anyBlips = drawing.getElementsByTagName("blip") || drawing.querySelectorAll("blip");
+      if (anyBlips && anyBlips.length > 0) {
+        embedId = anyBlips[0].getAttribute("r:embed") || anyBlips[0].getAttribute("embed");
+      }
+    }
+
+    if (!embedId) continue;
+
+    const imgTargetPath = relsMap.get(embedId);
+    if (!imgTargetPath) continue;
+
+    const imgFile = zip.file(imgTargetPath);
+    if (!imgFile) continue;
+
+    const bytes = await imgFile.async("uint8array");
+    const imageBinBase64 = arrayBufferToBase64(bytes);
+    const imageExt = imgTargetPath.split('.').pop()?.toLowerCase() || "png";
+    const mimeType = imageExt === "jpg" || imageExt === "jpeg" ? "image/jpeg" : `image/${imageExt}`;
+
+    const dataUrl = `data:${mimeType};base64,${imageBinBase64}`;
+
+    let targetToReplace: Node = drawing;
+    let parentNode = drawing.parentNode;
+    while (parentNode) {
+      const name = (parentNode as Element).localName || parentNode.nodeName;
+      if (name === 'r' || name === 'drawing') {
+        targetToReplace = parentNode;
+      }
+      parentNode = parentNode.parentNode;
+    }
+
+    const wNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const rElement = doc.createElementNS(wNamespace, "w:r");
+    const tElement = doc.createElementNS(wNamespace, "w:t");
+    tElement.textContent = `[!img:${dataUrl}]`;
+    rElement.appendChild(tElement);
+
+    targetToReplace.parentNode?.replaceChild(rElement, targetToReplace);
+    modified = true;
+  }
+
+  // 4. Process legacy VML / standalone imagedata elements
+  const imagedataNodes: Element[] = [];
+  const currentElements4 = doc.getElementsByTagName("*");
+  for (let i = 0; i < currentElements4.length; i++) {
+    const el = currentElements4[i];
+    if (el.localName === 'imagedata') {
+      imagedataNodes.push(el);
+    }
+  }
+
+  for (let i = imagedataNodes.length - 1; i >= 0; i--) {
+    const imagedata = imagedataNodes[i];
+    if (!doc.contains(imagedata)) continue;
+
+    let isWrapped = false;
+    let p = imagedata.parentNode;
+    while (p) {
+      const name = (p as Element).localName || p.nodeName;
+      if (name === 'object' || name === 'objectPr' || name === 'drawing') {
+        isWrapped = true;
+        break;
+      }
+      p = p.parentNode;
+    }
+    if (isWrapped) continue;
+
+    let imgRelId = imagedata.getAttribute("r:id") || imagedata.getAttribute("id") || imagedata.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id");
+    if (!imgRelId) continue;
+
+    const imgTargetPath = relsMap.get(imgRelId);
+    if (!imgTargetPath) continue;
+
+    const imgFile = zip.file(imgTargetPath);
+    if (!imgFile) continue;
+
+    const bytes = await imgFile.async("uint8array");
+    const imageBinBase64 = arrayBufferToBase64(bytes);
+    const imageExt = imgTargetPath.split('.').pop()?.toLowerCase() || "png";
+    const mimeType = imageExt === "jpg" || imageExt === "jpeg" ? "image/jpeg" : `image/${imageExt}`;
+
+    const dataUrl = `data:${mimeType};base64,${imageBinBase64}`;
+
+    let targetToReplace: Node = imagedata;
+    let parentNode = imagedata.parentNode;
+    while (parentNode) {
+      const name = (parentNode as Element).localName || parentNode.nodeName;
+      if (name === 'r' || name === 'shape' || name === 'pict') {
+        targetToReplace = parentNode;
+      }
+      parentNode = parentNode.parentNode;
+    }
+
+    const wNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const rElement = doc.createElementNS(wNamespace, "w:r");
+    const tElement = doc.createElementNS(wNamespace, "w:t");
+    tElement.textContent = `[!img:${dataUrl}]`;
+    rElement.appendChild(tElement);
+
+    targetToReplace.parentNode?.replaceChild(rElement, targetToReplace);
+    modified = true;
+  }
+
+  // 5. Send all extracted assets to Server
+  if (mathAssets.length > 0) {
+    try {
+      await fetch('/api/math-assets', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(mathAssets)
+      });
+      console.log(`Extracted and uploaded ${mathAssets.length} math assets to the server.`);
+    } catch (saveErr) {
+      console.error("Failed to save math assets to server:", saveErr);
+    }
+  }
+
+  if (modified) {
+    const serializer = new XMLSerializer();
+    const newXmlText = serializer.serializeToString(doc);
+    zip.file("word/document.xml", newXmlText);
+    return await zip.generateAsync({ type: "arraybuffer" });
+  }
+
+  return arrayBuffer;
+};
+
+const postprocessMathAssetsInDocx = async (shuffledBlob: Blob, exam: GeneratedExam): Promise<Blob> => {
+  // Load the newly generated docx as zip first to scan for placeholders directly in document.xml
+  const zip = await JSZip.loadAsync(shuffledBlob);
+
+  const docXmlText = await zip.file("word/document.xml")?.async("string");
+  if (!docXmlText) return shuffledBlob;
+
+  const assetIdsReferenced = new Set<string>();
+  const matches = docXmlText.matchAll(/\[!m:(mathtype_[^\]]+?)\]/g);
+  for (const match of matches) {
+    assetIdsReferenced.add(match[1]);
+  }
+
+  const matchesDollar = docXmlText.matchAll(/\[!m:\$(mathtype_[^\$]+?)\$\]/g);
+  for (const match of matchesDollar) {
+    assetIdsReferenced.add(match[1]);
+  }
+
+  console.log("postprocessMathAssetsInDocx discovered asset IDs directly from document.xml:", Array.from(assetIdsReferenced));
+
+  if (assetIdsReferenced.size === 0) {
+    return shuffledBlob;
+  }
+
+  // Fetch math assets details in bulk
+  let fetchedAssets: any[] = [];
+  try {
+    const response = await fetch('/api/math-assets/get-bulk', {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ ids: Array.from(assetIdsReferenced) })
+    });
+    fetchedAssets = await response.json();
+  } catch (err) {
+    console.error("Failed to fetch math assets for post-processing:", err);
+    return shuffledBlob;
+  }
+
+  if (fetchedAssets.length === 0) {
+    return shuffledBlob;
+  }
+
+  const assetsMap = new Map<string, any>();
+  fetchedAssets.forEach(asset => assetsMap.set(asset.id, asset));
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(docXmlText, "application/xml");
+
+  // Load and parse relationships
+  let relsXmlText = await zip.file("word/_rels/document.xml.rels")?.async("string");
+  if (!relsXmlText) {
+    relsXmlText = '<?xml version="1.0" encoding="UTF-16" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+  }
+  const relsDoc = parser.parseFromString(relsXmlText, "application/xml");
+  const relationshipsTag = relsDoc.documentElement;
+
+  const rToReplaceList: { rNode: Element, assetId: string }[] = [];
+
+  // Locate all runs containing the placeholder! Case-insensitive + namespace-agnostic matching
+  const allDocElements = doc.getElementsByTagName("*");
+  for (let i = 0; i < allDocElements.length; i++) {
+    const rNode = allDocElements[i];
+    const rNodeName = (rNode.localName || rNode.nodeName).toLowerCase();
+    if (rNodeName === 'r' || rNodeName === 'w:r') {
+      let tNode: Element | null = null;
+      for (let j = 0; j < rNode.childNodes.length; j++) {
+        const child = rNode.childNodes[j];
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          const childName = ((child as Element).localName || child.nodeName).toLowerCase();
+          if (childName === 't' || childName === 'w:t') {
+            tNode = child as Element;
+            break;
+          }
+        }
+      }
+      if (tNode && tNode.textContent) {
+        const contentText = tNode.textContent;
+        const match = contentText.match(/\[!m:(mathtype_[^\]]+?)\]/);
+        if (match) {
+          const assetId = match[1];
+          if (assetsMap.has(assetId)) {
+            rToReplaceList.push({ rNode, assetId });
+          }
+        }
+      }
+    }
+  }
+
+  const replacedAssetIds = new Set<string>();
+
+  for (const item of rToReplaceList) {
+    const { rNode, assetId } = item;
+    const asset = assetsMap.get(assetId);
+    if (!asset) continue;
+
+    // Wrap original XML within a comprehensive root of namespace bindings to secure against prefix unbound XML parser failures
+    let actualAssetElement: Element | null = null;
+    try {
+      const wrappedXml = `<wrapper 
+        xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+        xmlns:o="urn:schemas-microsoft-com:office:office"
+        xmlns:v="urn:schemas-microsoft-com:vml"
+        xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+        xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:w10="urn:schemas-microsoft-com:office:word"
+        xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+        xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"
+        xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+        xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+        xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"
+        xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"
+      >${asset.originalXml}</wrapper>`;
+
+      const assetDoc = parser.parseFromString(wrappedXml, "application/xml");
+      const parserError = assetDoc.getElementsByTagName("parsererror")[0];
+      if (!parserError) {
+        actualAssetElement = assetDoc.documentElement.firstElementChild;
+      } else {
+        console.warn("XML wrapped Parse Error for asset, trying direct parse:", assetId, parserError.textContent);
+        const directDoc = parser.parseFromString(asset.originalXml, "application/xml");
+        if (!directDoc.getElementsByTagName("parsererror")[0]) {
+          actualAssetElement = directDoc.documentElement;
+        }
+      }
+    } catch (parseErr) {
+      console.error("Critical error parsing XML for asset:", assetId, parseErr);
+    }
+
+    if (!actualAssetElement) {
+      console.error("Failed to parse math asset XML for", assetId);
+      continue;
+    }
+
+    const assetNode = doc.importNode(actualAssetElement, true);
+
+    // Clean style to make sure the legacy MathType shapes render inline-with-text instead of floating absolutely
+    const allAssetElements = assetNode.getElementsByTagName("*");
+    for (let j = 0; j < allAssetElements.length; j++) {
+      const el = allAssetElements[j];
+      const styleAttr = el.getAttribute("style");
+      if (styleAttr) {
+        const stylePairs = styleAttr.split(';').map(p => p.trim()).filter(p => p !== '');
+        const cleanPairs = stylePairs.filter(pair => {
+          const parts = pair.split(':');
+          if (parts.length < 2) return false;
+          const key = parts[0].trim().toLowerCase();
+          return ![
+            'position',
+            'margin-left',
+            'margin-top',
+            'left',
+            'top',
+            'mso-position-horizontal',
+            'mso-position-vertical',
+            'mso-position-horizontal-relative',
+            'mso-position-vertical-relative',
+            'mso-wrap-style',
+            'mso-wrap-distance-left',
+            'mso-wrap-distance-top',
+            'mso-wrap-distance-right',
+            'mso-wrap-distance-bottom'
+          ].includes(key);
+        });
+        cleanPairs.push('position:static');
+        el.setAttribute("style", cleanPairs.join(';'));
+      }
+    }
+
+    // Update relationship references in the assetNode if it's an OLE object
+    if (asset.oleBinBase64) {
+      // Set relation IDs inside the OLE XML in a namespace-independent manner
+      const OLE_REL_ID = `relOle_${assetId}`;
+      const IMG_REL_ID = `relImg_${assetId}`;
+      const rNamespace = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+      for (let j = 0; j < allAssetElements.length; j++) {
+        const el = allAssetElements[j];
+        const elName = (el.localName || el.nodeName).toLowerCase();
+        if (elName === 'oleobject' || elName === 'o:oleobject') {
+          el.setAttributeNS(rNamespace, "r:id", OLE_REL_ID);
+        }
+        if (elName === 'imagedata' || elName === 'v:imagedata') {
+          el.setAttributeNS(rNamespace, "r:id", IMG_REL_ID);
+        }
+      }
+
+      // Add actual relationships to relsDoc if they are not already added using correct Relationships schema namespaces
+      if (!replacedAssetIds.has(assetId) && relationshipsTag) {
+        const relNs = relationshipsTag.namespaceURI || "http://schemas.openxmlformats.org/package/2006/relationships";
+
+        // Add OLE binary relationship
+        const oleRel = relsDoc.createElementNS(relNs, "Relationship");
+        oleRel.setAttribute("Id", OLE_REL_ID);
+        oleRel.setAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject");
+        oleRel.setAttribute("Target", `embeddings/ole_${assetId}.bin`);
+        relationshipsTag.appendChild(oleRel);
+
+        // Add Image relationship
+        const imgRel = relsDoc.createElementNS(relNs, "Relationship");
+        imgRel.setAttribute("Id", IMG_REL_ID);
+        imgRel.setAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image");
+        imgRel.setAttribute("Target", `media/img_${assetId}.${asset.imageExt || 'png'}`);
+        relationshipsTag.appendChild(imgRel);
+
+        // Write binary assets to JSZip
+        const oleBytes = base64ToUint8Array(asset.oleBinBase64);
+        zip.file(`word/embeddings/ole_${assetId}.bin`, oleBytes);
+
+        if (asset.imageBinBase64) {
+          const imgBytes = base64ToUint8Array(asset.imageBinBase64);
+          zip.file(`word/media/img_${assetId}.${asset.imageExt || 'png'}`, imgBytes);
+        }
+
+        replacedAssetIds.add(assetId);
+      }
+    }
+
+    // Wrap w:object in a w:r segment to maintain perfect inline DOCX schema validation and styling
+    let finalNodeToInsert = assetNode;
+    const assetNodeName = (assetNode.localName || assetNode.nodeName).toLowerCase();
+    if (assetNodeName === 'object' || assetNodeName === 'w:object') {
+      const wNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+      const rElement = doc.createElementNS(wNamespace, "w:r");
+      rElement.appendChild(assetNode);
+      finalNodeToInsert = rElement;
+    }
+
+    // Replace the text run rNode with the exact imported assetNode
+    rNode.parentNode?.replaceChild(finalNodeToInsert, rNode);
+  }
+
+  // Serialize and write back document.xml
+  const serializer = new XMLSerializer();
+  zip.file("word/document.xml", serializer.serializeToString(doc));
+
+  // Serialize and write back document.xml.rels
+  zip.file("word/_rels/document.xml.rels", serializer.serializeToString(relsDoc));
+
+  // Ensure content types registry matches
+  const contentTypesXmlText = await zip.file("[Content_Types].xml")?.async("string");
+  if (contentTypesXmlText) {
+    const ctDoc = parser.parseFromString(contentTypesXmlText, "application/xml");
+    const typesTag = ctDoc.documentElement;
+    if (typesTag) {
+      // Ensure default content types are there (Namespace-agnostic / lowercase-robust matching)
+      const defaults: Element[] = [];
+      const allCtElements = ctDoc.getElementsByTagName("*");
+      for (let i = 0; i < allCtElements.length; i++) {
+        const tagLocalName = (allCtElements[i].localName || allCtElements[i].nodeName).toLowerCase();
+        if (tagLocalName === 'default') {
+          defaults.push(allCtElements[i]);
+        }
+      }
+      const extensions = new Set<string>();
+      for (let i = 0; i < defaults.length; i++) {
+        extensions.add(defaults[i].getAttribute("Extension")?.toLowerCase() || "");
+      }
+
+      const reqExtensions = [
+        { ext: "bin", mime: "application/vnd.openxmlformats-officedocument.oleObject" },
+        { ext: "wmf", mime: "image/x-wmf" },
+        { ext: "emf", mime: "image/x-emf" }
+      ];
+
+      const ctNs = typesTag.namespaceURI || "http://schemas.openxmlformats.org/package/2006/content-types";
+      reqExtensions.forEach(({ ext, mime }) => {
+        if (!extensions.has(ext)) {
+          const d = ctDoc.createElementNS(ctNs, "Default");
+          d.setAttribute("Extension", ext);
+          d.setAttribute("ContentType", mime);
+          typesTag.appendChild(d);
+        }
+      });
+
+      zip.file("[Content_Types].xml", serializer.serializeToString(ctDoc));
+    }
+  }
+
+  return await zip.generateAsync({ type: "blob" });
+};
+
+// --- LaTeX to docx math structure compiler helpers for export ---
+
+const tokenize = (latex: string): Token[] => {
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < latex.length) {
+    const char = latex[i];
+    if (char === '{') {
+      tokens.push({ type: 'LBRACE', value: '{' });
+      i++;
+    } else if (char === '}') {
+      tokens.push({ type: 'RBRACE', value: '}' });
+      i++;
+    } else if (char === '[') {
+      tokens.push({ type: 'LBRACKET', value: '[' });
+      i++;
+    } else if (char === ']') {
+      tokens.push({ type: 'RBRACKET', value: ']' });
+      i++;
+    } else if (char === '(') {
+      tokens.push({ type: 'LPAREN', value: '(' });
+      i++;
+    } else if (char === ')') {
+      tokens.push({ type: 'RPAREN', value: ')' });
+      i++;
+    } else if (char === '_') {
+      tokens.push({ type: 'SUB', value: '_' });
+      i++;
+    } else if (char === '^') {
+      tokens.push({ type: 'SUP', value: '^' });
+      i++;
+    } else if (char === '\\') {
+      let val = '\\';
+      i++;
+      if (i < latex.length) {
+        if (/[a-zA-Z]/.test(latex[i])) {
+          while (i < latex.length && /[a-zA-Z]/.test(latex[i])) {
+            val += latex[i];
+            i++;
+          }
+        } else {
+          val += latex[i];
+          i++;
+        }
+      }
+      tokens.push({ type: 'CMD', value: val });
+    } else if (/\s/.test(char)) {
+      i++;
+    } else {
+      let textVal = '';
+      while (i < latex.length && !(/[{}[\]()_^\\\s]/.test(latex[i]))) {
+        textVal += latex[i];
+        i++;
+      }
+      tokens.push({ type: 'TEXT', value: textVal });
+    }
+  }
+  return tokens;
+};
+
+const compileTokens = (tokens: Token[]): MathComponent[] => {
+  let index = 0;
+
+  const parseExpression = (): MathComponent[] => {
+    const components: MathComponent[] = [];
+    while (index < tokens.length) {
+      const token = tokens[index];
+      if (token.type === 'RBRACE' || token.type === 'RBRACKET' || token.type === 'RPAREN') {
+        break;
+      }
+
+      const nextComponent = parseNode();
+      if (nextComponent) {
+        components.push(nextComponent);
+      }
+    }
+    return components;
+  };
+
+  const parseNode = (): MathComponent | null => {
+    if (index >= tokens.length) return null;
+    const token = tokens[index];
+
+    if (token.type === 'TEXT') {
+      index++;
+      return applyScripts(new MathRun(token.value));
+    }
+
+    if (token.type === 'CMD') {
+      const cmd = token.value;
+      index++;
+
+      if (cmd === '\\frac') {
+        const num = parseBracedGroup();
+        const den = parseBracedGroup();
+        return applyScripts(new MathFraction({ numerator: num, denominator: den }));
+      }
+
+      if (cmd === '\\sqrt') {
+        let deg: MathComponent[] | undefined = undefined;
+        if (index < tokens.length && tokens[index].type === 'LBRACKET') {
+          deg = parseBracketedGroup();
+        }
+        const base = parseBracedGroup();
+        return applyScripts(new MathRadical({ children: base, degree: deg }));
+      }
+
+      if (cmd === '\\left') {
+        if (index < tokens.length) {
+          const next = tokens[index];
+          index++;
+          const inner = parseExpression();
+          if (index < tokens.length && tokens[index].value === '\\right') {
+            index++;
+            if (index < tokens.length) index++;
+          }
+          if (next.value === '(') return applyScripts(new MathRoundBrackets({ children: inner }));
+          if (next.value === '[') return applyScripts(new MathSquareBrackets({ children: inner }));
+          if (next.value === '{') return applyScripts(new MathCurlyBrackets({ children: inner }));
+          return applyScripts(new MathRoundBrackets({ children: inner }));
+        }
+      }
+
+      let symbol = cmd;
+      const GreekMap: { [key: string]: string } = {
+        '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\delta': 'δ', '\\epsilon': 'ε',
+        '\\zeta': 'ζ', '\\eta': 'η', '\\theta': 'θ', '\\iota': 'ι', '\\kappa': 'κ',
+        '\\lambda': 'λ', '\\mu': 'μ', '\\nu': 'ν', '\\xi': 'ξ', '\\pi': 'π',
+        '\\rho': 'ρ', '\\sigma': 'σ', '\\tau': 'τ', '\\upsilon': 'υ', '\\phi': 'φ',
+        '\\chi': 'χ', '\\psi': 'ψ', '\\omega': 'ω',
+        '\\Delta': 'Δ', '\\Omega': 'Ω', '\\Pi': 'Π', '\\Sigma': 'Σ', '\\Theta': 'Θ', '\\Phi': 'Φ',
+        '\\pm': '±', '\\mp': '∓', '\\times': '×', '\\div': '÷', '\\infty': '∞',
+        '\\le': '≤', '\\ge': '≥', '\\neq': '≠', '\\approx': '≈', '\\sim': '∼',
+        '\\in': 'in', '\\subset': '⊂', '\\supset': '⊃', '\\cap': '∩', '\\cup': '∪'
+      };
+      if (GreekMap[cmd]) {
+        symbol = GreekMap[cmd];
+      } else {
+        symbol = cmd.replace('\\', '');
+      }
+
+      return applyScripts(new MathRun(symbol));
+    }
+
+    if (token.type === 'LPAREN') {
+      index++;
+      const inner = parseExpression();
+      if (index < tokens.length && tokens[index].type === 'RPAREN') index++;
+      return applyScripts(new MathRoundBrackets({ children: inner }));
+    }
+
+    if (token.type === 'LBRACKET') {
+      index++;
+      const inner = parseExpression();
+      if (index < tokens.length && tokens[index].type === 'RBRACKET') index++;
+      return applyScripts(new MathSquareBrackets({ children: inner }));
+    }
+
+    if (token.type === 'LBRACE') {
+      index++;
+      const inner = parseExpression();
+      if (index < tokens.length && tokens[index].type === 'RBRACE') index++;
+      return applyScripts(new MathCurlyBrackets({ children: inner }));
+    }
+
+    index++;
+    return null;
+  };
+
+  const parseBracedGroup = (): MathComponent[] => {
+    if (index < tokens.length && tokens[index].type === 'LBRACE') {
+      index++;
+      const res = parseExpression();
+      if (index < tokens.length && tokens[index].type === 'RBRACE') {
+        index++;
+      }
+      return res;
+    }
+    const single = parseNode();
+    return single ? [single] : [];
+  };
+
+  const parseBracketedGroup = (): MathComponent[] => {
+    if (index < tokens.length && tokens[index].type === 'LBRACKET') {
+      index++;
+      const res = parseExpression();
+      if (index < tokens.length && tokens[index].type === 'RBRACKET') {
+        index++;
+      }
+      return res;
+    }
+    return [];
+  };
+
+  const applyScripts = (base: MathComponent): MathComponent => {
+    if (index < tokens.length) {
+      if (tokens[index].type === 'SUB') {
+        index++;
+        const sub = parseBracedGroup();
+        if (index < tokens.length && tokens[index].type === 'SUP') {
+          index++;
+          const sup = parseBracedGroup();
+          return new MathSubSuperScript({ children: [base], subScript: sub, superScript: sup });
+        }
+        return new MathSubScript({ children: [base], subScript: sub });
+      } else if (tokens[index].type === 'SUP') {
+        index++;
+        const sup = parseBracedGroup();
+        if (index < tokens.length && tokens[index].type === 'SUB') {
+          index++;
+          const sub = parseBracedGroup();
+          return new MathSubSuperScript({ children: [base], subScript: sub, superScript: sup });
+        }
+        return new MathSuperScript({ children: [base], superScript: sup });
+      }
+    }
+    return base;
+  };
+
+  return parseExpression();
+};
+
+const parseLatexToDocxMath = (latex: string): MathComponent[] => {
+  try {
+    const tokens = tokenize(latex);
+    return compileTokens(tokens);
+  } catch (err) {
+    console.error("Failed to parse LaTeX to docx math structure, falling back to MathRun", err, latex);
+    return [new MathRun(latex)];
+  }
+};
 
 // --- Components ---
 
@@ -101,18 +1173,28 @@ export default function App() {
   });
 
   const [partLabels, setPartLabels] = useState({
-    part1: "PHẦN I. Thí sinh trả lời từ câu 1 đến câu 18. Mỗi câu hỏi thí sinh chỉ chọn một phương án.",
-    part2: "PHẦN II. Thí sinh trả lời từ câu 1 đến câu 4. Trong mỗi ý a), b), c), d) ở mỗi câu, thí sinh chọn đúng hoặc sai.",
-    part3: "PHẦN III. Thí sinh trả lời từ câu 1 đến câu 6. Mỗi câu trả lời đúng thí sinh được 0,25 điểm."
+    part1: "PHẦN I. Thí sinh trả lời từ câu 1 đến câu 18. Mỗi câu chỉ chọn một phương án.",
+    part2: "PHẦN II. Thí sinh trả lời từ câu 1 đến câu 4. Mỗi câu có các ý a), b), c), d; thí sinh đánh dấu Đúng hoặc Sai cho từng ý.",
+    part3: "PHẦN III. Thí sinh trả lời từ câu 1 đến câu 6. Mỗi câu trả lời đúng được 0,25 điểm."
   });
 
   useEffect(() => {
     setPartLabels({
-      part1: `PHẦN I. Thí sinh trả lời từ câu 1 đến câu ${structure.part1_count}. Mỗi câu hỏi thí sinh chỉ chọn một phương án.`,
-      part2: `PHẦN II. Thí sinh trả lời từ câu 1 đến câu ${structure.part2_count}. Trong mỗi ý a), b), c), d) ở mỗi câu, thí sinh chọn đúng hoặc sai.`,
-      part3: `PHẦN III. Thí sinh trả lời từ câu 1 đến câu ${structure.part3_count}. Mỗi câu trả lời đúng thí sinh được 0,25 điểm.`
+      part1: `PHẦN I. Thí sinh trả lời từ câu 1 đến câu ${structure.part1_count}. Mỗi câu chỉ chọn một phương án.`,
+      part2: `PHẦN II. Thí sinh trả lời từ câu 1 đến câu ${structure.part2_count}. Mỗi câu có các ý a), b), c), d; thí sinh đánh dấu Đúng hoặc Sai cho từng ý.`,
+      part3: `PHẦN III. Thí sinh trả lời từ câu 1 đến câu ${structure.part3_count}. Mỗi câu trả lời đúng được 0,25 điểm.`
     });
   }, [structure.part1_count, structure.part2_count, structure.part3_count]);
+
+  useEffect(() => {
+    if (typeof (window as any).MathJax !== 'undefined' && (window as any).MathJax.typesetPromise) {
+      const timer = setTimeout(() => {
+        (window as any).MathJax.typesetPromise()
+          .catch((err: any) => console.error("MathJax Render Error:", err));
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [activeTab, questions, generatedExams, isModalOpen]);
 
   useEffect(() => {
     fetchQuestions();
@@ -298,16 +1380,16 @@ export default function App() {
 
       const formattedQuestions = data.map((row: any) => ({
         type: row.Loai || 'SINGLE_CHOICE',
-        content: row.NoiDung || '',
-        option_a: row.A || '',
-        option_b: row.B || '',
-        option_c: row.C || '',
-        option_d: row.D || '',
+        content: convertRawTextToHtmlWithFormulas(row.NoiDung || ''),
+        option_a: convertRawTextToHtmlWithFormulas(row.A || ''),
+        option_b: convertRawTextToHtmlWithFormulas(row.B || ''),
+        option_c: convertRawTextToHtmlWithFormulas(row.C || ''),
+        option_d: convertRawTextToHtmlWithFormulas(row.D || ''),
         correct_answer: row.DapAn || 'A',
         topic: row.MonHoc || row.ChuyenDe || 'Chưa phân loại',
         difficulty: row.DoKho || 'Trung bình',
         image_url: row.HinhAnh || '',
-        explanation: row.LoiGiai || ''
+        explanation: convertRawTextToHtmlWithFormulas(row.LoiGiai || '')
       }));
 
       setLoading(true);
@@ -334,8 +1416,14 @@ export default function App() {
 
     const reader = new FileReader();
     reader.onload = async (evt) => {
-      const arrayBuffer = evt.target?.result as ArrayBuffer;
+      let arrayBuffer = evt.target?.result as ArrayBuffer;
       try {
+        // Run preprocessing on Word document to parse internal Office Math / MathType XML XML structures to LaTeX $ ... $ delimiters
+        try {
+          arrayBuffer = await preprocessDocx(arrayBuffer);
+        } catch (mathErr) {
+          console.error("Math preprocessing failed, using original document:", mathErr);
+        }
         const result = await mammoth.extractRawText({ arrayBuffer });
         const text = result.value;
         
@@ -403,18 +1491,39 @@ export default function App() {
             type = 'SHORT_ANSWER';
           }
           
+          const finalContent = convertRawTextToHtmlWithFormulas(content.trim());
+          const finalA = convertRawTextToHtmlWithFormulas(a.trim());
+          const finalB = convertRawTextToHtmlWithFormulas(b.trim());
+          const finalC = convertRawTextToHtmlWithFormulas(c.trim());
+          const finalD = convertRawTextToHtmlWithFormulas(d.trim());
+          const finalExpl = convertRawTextToHtmlWithFormulas(expl.trim());
+
+          // Populate image_url automatically with first inline image from question's content
+          let finalImgUrl = imgUrl;
+          if (!finalImgUrl && finalContent) {
+            const parser = new DOMParser();
+            const parsedDoc = parser.parseFromString(finalContent, 'text/html');
+            const firstImg = parsedDoc.querySelector('img');
+            if (firstImg) {
+              const src = firstImg.getAttribute('src');
+              if (src && !src.includes('/api/math-assets/')) {
+                finalImgUrl = src;
+              }
+            }
+          }
+
           return {
             type,
-            content: content.trim(),
-            option_a: a.trim(),
-            option_b: b.trim(),
-            option_c: c.trim(),
-            option_d: d.trim(),
+            content: finalContent,
+            option_a: finalA,
+            option_b: finalB,
+            option_c: finalC,
+            option_d: finalD,
             correct_answer: ans || ((type as string) === 'TRUE_FALSE' ? 'T,T,T,T' : (type === 'SHORT_ANSWER' ? '' : 'A')),
             topic: topic,
             difficulty: diff as any,
-            image_url: imgUrl,
-            explanation: expl.trim()
+            image_url: finalImgUrl,
+            explanation: finalExpl
           };
         }).filter(q => q.content !== '');
 
@@ -571,7 +1680,7 @@ export default function App() {
         [{ 'header': [1, 2, false] }],
         ['bold', 'italic', 'underline', 'strike', 'blockquote'],
         [{ 'list': 'ordered' }, { 'list': 'bullet' }, { 'indent': '-1' }, { 'indent': '+1' }],
-        ['link', 'image'],
+        ['link', 'image', 'formula'],
         ['clean']
       ],
       handlers: {
@@ -631,6 +1740,12 @@ export default function App() {
 
   const fetchImageAsBuffer = async (url: string): Promise<Uint8Array | null> => {
     try {
+      if (url.startsWith('data:')) {
+        const parts = url.split(',');
+        if (parts.length > 1) {
+          return base64ToUint8Array(parts[1]);
+        }
+      }
       const response = await fetch(url);
       const buffer = await response.arrayBuffer();
       return new Uint8Array(buffer);
@@ -658,10 +1773,24 @@ export default function App() {
     const urls = new Set<string>();
     const extract = (q: Question) => {
       if (q.image_url) urls.add(q.image_url);
-      const doc = new DOMParser().parseFromString(q.content || '', 'text/html');
+      
+      // Parse main content for MathType images
+      const doc = new DOMParser().parseFromString(ensureMathAssetsRendered(q.content || ''), 'text/html');
       doc.querySelectorAll('img').forEach(img => {
         const src = img.getAttribute('src');
         if (src) urls.add(src);
+      });
+
+      // Parse options for MathType images
+      const opts = [q.option_a, q.option_b, q.option_c, q.option_d];
+      opts.forEach(opt => {
+        if (opt) {
+          const optDoc = new DOMParser().parseFromString(ensureMathAssetsRendered(opt), 'text/html');
+          optDoc.querySelectorAll('img').forEach(img => {
+            const src = img.getAttribute('src');
+            if (src) urls.add(src);
+          });
+        }
       });
     };
     exam.part1.forEach(extract);
@@ -670,12 +1799,61 @@ export default function App() {
     return Array.from(urls);
   };
 
+  const renderHtmlToParagraphChildren = (html: string, imageMap: Map<string, Uint8Array> | null = null): any[] => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html || '', 'text/html');
+    const children: any[] = [];
+
+    const process = (node: Node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.textContent && node.textContent.trim()) {
+          children.push(new TextRun({ text: convertTexDelimiters(node.textContent) }));
+        }
+      } else if (node instanceof Element && node.classList.contains('ql-formula')) {
+        const formula = node.getAttribute('data-value');
+        if (formula) {
+          try {
+            const mathComponents = parseLatexToDocxMath(formula);
+            children.push(new DocxMath({ children: mathComponents }));
+          } catch (e) {
+            console.error("Error creating docx native math", e);
+            children.push(new TextRun({ text: `$${formula.trim()}$` }));
+          }
+        }
+      } else if (node.nodeName === 'IMG') {
+        const element = node as HTMLImageElement;
+        const isMathAsset = element.classList.contains('inline-math-asset') || (element.getAttribute('src') || '').includes('/api/math-assets/');
+        if (isMathAsset) {
+          const assetId = element.getAttribute('alt') || '';
+          if (assetId) {
+            children.push(new TextRun({ text: `[!m:${assetId}]` }));
+          }
+        } else if (imageMap) {
+          const src = element.getAttribute('src');
+          const buffer = src ? imageMap.get(src) : null;
+          if (buffer) {
+            children.push(new ImageRun({
+              data: buffer,
+              transformation: { width: 300, height: 200 },
+              type: 'png'
+            }));
+          }
+        }
+      } else {
+        node.childNodes.forEach(process);
+      }
+    };
+
+    process(doc.body);
+    return children;
+  };
+
   const renderQuestionContentDocx = (q: Question, prefix: string, imageMap: Map<string, Uint8Array>) => {
-    const html = q.content || '';
+    const html = ensureMathAssetsRendered(q.content || '');
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
     const paragraphs: Paragraph[] = [];
-    let currentRuns: (TextRun | ImageRun)[] = [];
+    let currentRuns: any[] = [];
     let isFirst = true;
 
     const processNode = (node: Node) => {
@@ -685,21 +1863,49 @@ export default function App() {
             currentRuns.push(new TextRun({ text: prefix, bold: true }));
             isFirst = false;
           }
-          currentRuns.push(new TextRun({ text: node.textContent }));
+          currentRuns.push(new TextRun({ text: convertTexDelimiters(node.textContent) }));
         }
-      } else if (node.nodeName === 'IMG') {
-        const src = (node as HTMLImageElement).getAttribute('src');
-        const buffer = src ? imageMap.get(src) : null;
-        if (buffer) {
+      } else if (node instanceof Element && node.classList.contains('ql-formula')) {
+        const formula = node.getAttribute('data-value');
+        if (formula) {
           if (isFirst) {
             currentRuns.push(new TextRun({ text: prefix, bold: true }));
             isFirst = false;
           }
-          currentRuns.push(new ImageRun({
-            data: buffer,
-            transformation: { width: 300, height: 200 },
-            type: 'png'
-          }));
+          try {
+            const mathComponents = parseLatexToDocxMath(formula);
+            currentRuns.push(new DocxMath({ children: mathComponents }));
+          } catch (e) {
+            console.error("Error creating docx native math, falling back to text run", e);
+            currentRuns.push(new TextRun({ text: `$${formula.trim()}$` }));
+          }
+        }
+      } else if (node.nodeName === 'IMG') {
+        const element = node as HTMLImageElement;
+        const isMathAsset = element.classList.contains('inline-math-asset') || (element.getAttribute('src') || '').includes('/api/math-assets/');
+        if (isMathAsset) {
+          const assetId = element.getAttribute('alt') || '';
+          if (assetId) {
+            if (isFirst) {
+              currentRuns.push(new TextRun({ text: prefix, bold: true }));
+              isFirst = false;
+            }
+            currentRuns.push(new TextRun({ text: `[!m:${assetId}]` }));
+          }
+        } else {
+          const src = element.getAttribute('src');
+          const buffer = src ? imageMap.get(src) : null;
+          if (buffer) {
+            if (isFirst) {
+              currentRuns.push(new TextRun({ text: prefix, bold: true }));
+              isFirst = false;
+            }
+            currentRuns.push(new ImageRun({
+              data: buffer,
+              transformation: { width: 300, height: 200 },
+              type: 'png'
+            }));
+          }
         }
       } else if (['P', 'DIV', 'LI', 'BR'].includes(node.nodeName)) {
         if (currentRuns.length > 0) {
@@ -829,9 +2035,29 @@ export default function App() {
           ...exam.part1.flatMap((q, idx) => {
             const paragraphs = renderQuestionContentDocx(q, `Câu ${idx + 1}. `, imageMap);
 
+            const optA = q.shuffled_options && q.shuffled_options.length > 0
+              ? q.shuffled_options.find(o => o.label === 'A')?.text || ''
+              : q.option_a || '';
+            const optB = q.shuffled_options && q.shuffled_options.length > 0
+              ? q.shuffled_options.find(o => o.label === 'B')?.text || ''
+              : q.option_b || '';
+            const optC = q.shuffled_options && q.shuffled_options.length > 0
+              ? q.shuffled_options.find(o => o.label === 'C')?.text || ''
+              : q.option_c || '';
+            const optD = q.shuffled_options && q.shuffled_options.length > 0
+              ? q.shuffled_options.find(o => o.label === 'D')?.text || ''
+              : q.option_d || '';
+
             paragraphs.push(new Paragraph({
               children: [
-                new TextRun({ text: `A. ${q.option_a}\t\tB. ${q.option_b}\t\tC. ${q.option_c}\t\tD. ${q.option_d}` }),
+                new TextRun({ text: "A. " }),
+                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optA), imageMap),
+                new TextRun({ text: "\t\tB. " }),
+                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optB), imageMap),
+                new TextRun({ text: "\t\tC. " }),
+                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optC), imageMap),
+                new TextRun({ text: "\t\tD. " }),
+                ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(optD), imageMap),
               ],
               indent: { left: 360 },
             }));
@@ -849,10 +2075,10 @@ export default function App() {
           ...exam.part2.flatMap((q, idx) => {
             const paragraphs = renderQuestionContentDocx(q, `Câu ${idx + 1}. `, imageMap);
 
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: `a) ${q.option_a}` })], indent: { left: 360 } }));
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: `b) ${q.option_b}` })], indent: { left: 360 } }));
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: `c) ${q.option_c}` })], indent: { left: 360 } }));
-            paragraphs.push(new Paragraph({ children: [new TextRun({ text: `d) ${q.option_d}` })], indent: { left: 360 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "a) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_a), imageMap)], indent: { left: 360 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "b) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_b), imageMap)], indent: { left: 360 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "c) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_c), imageMap)], indent: { left: 360 } }));
+            paragraphs.push(new Paragraph({ children: [new TextRun({ text: "d) " }), ...renderHtmlToParagraphChildren(ensureMathAssetsRendered(q.option_d), imageMap)], indent: { left: 360 } }));
 
             return paragraphs;
           }),
@@ -877,7 +2103,12 @@ export default function App() {
       }],
     });
 
-    const blob = await Packer.toBlob(doc);
+    let blob = await Packer.toBlob(doc);
+    try {
+      blob = await postprocessMathAssetsInDocx(blob, exam);
+    } catch (postErr) {
+      console.error("Error post-processing math assets in docx:", postErr);
+    }
     saveAs(blob, `De_Thi_Ma_${exam.code}.docx`);
   };
 
@@ -928,14 +2159,96 @@ export default function App() {
               .replace(/đ/g, 'd').replace(/Đ/g, 'D');
   };
 
+  const ensureMathAssetsRendered = (html: string): string => {
+    if (!html) return '';
+    let result = html;
+    
+    // Replace old style with $ (e.g. [!m:$mathtype_1_om_1$])
+    result = result.replace(/\[!m:\$(mathtype_[^\$]+?)\$\]/g, (_, assetId) => {
+      return `<img class="inline-math-asset" src="/api/math-assets/${assetId}/image" alt="${assetId}" style="max-height: 2.2em; vertical-align: middle; display: inline-block; margin: 0 4px;" referrerPolicy="no-referrer" />`;
+    });
+    
+    // Replace new style without $ (e.g. [!m:mathtype_1_om_1])
+    result = result.replace(/\[!m:(mathtype_[^\]]+?)\]/g, (_, assetId) => {
+      return `<img class="inline-math-asset" src="/api/math-assets/${assetId}/image" alt="${assetId}" style="max-height: 2.2em; vertical-align: middle; display: inline-block; margin: 0 4px;" referrerPolicy="no-referrer" />`;
+    });
+    
+    return result;
+  };
+
+  const convertRawTextToHtmlWithFormulas = (text: string): string => {
+    if (!text) return '';
+    
+    // First escape standard HTML entities to preserve text formatting inside HTML
+    let escaped = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    // 1. Double dollars: $$math$$ -> <span class="ql-formula" data-value="math">\(math\)</span>
+    escaped = escaped.replace(/\$\$(.*?)\$\$/gs, (_, formula) => {
+      const trimmed = formula.trim();
+      return `<span class="ql-formula" data-value="${trimmed}">\\(${trimmed}\\)</span>`;
+    });
+
+    // 2. Bracket display math: \[math\] -> <span class="ql-formula" data-value="math">\[math\]</span>
+    escaped = escaped.replace(/\\\[(.*?)\\\]/gs, (_, formula) => {
+      const trimmed = formula.trim();
+      return `<span class="ql-formula" data-value="${trimmed}">\\[${trimmed}\\]</span>`;
+    });
+
+    // 3. Parenthesis inline math: \(math\) -> <span class="ql-formula" data-value="math">\(math\)</span>
+    escaped = escaped.replace(/\\\((.*?)\\\)/gs, (_, formula) => {
+      const trimmed = formula.trim();
+      return `<span class="ql-formula" data-value="${trimmed}">\\(${trimmed}\\)</span>`;
+    });
+
+    // 4. Single dollars math: $math$ -> <span class="ql-formula" data-value="math">\(math\)</span>
+    escaped = escaped.replace(/\$([^\$]+?)\$/g, (_, formula) => {
+      const trimmed = formula.trim();
+      return `<span class="ql-formula" data-value="${trimmed}">\\(${trimmed}\\)</span>`;
+    });
+
+    // 5. MathType tracker placeholder replacement
+    escaped = ensureMathAssetsRendered(escaped);
+
+    // 6. Inline images replacement (replacing the placeholder with real img tag AFTER escaping)
+    escaped = escaped.replace(/\[!img:(data:image\/[^\]]+?)\]/g, (_, dataUrl) => {
+      return `<img src="${dataUrl}" class="inline-block max-w-full my-2 align-middle" style="max-height: 12rem;" />`;
+    });
+
+    return escaped;
+  };
+
+  const convertTexDelimiters = (text: string) => {
+    if (!text) return '';
+    // Preserve or convert standard TeX structures to MathType-compatible standard $ ... $ and $$ ... $$
+    let result = text;
+    // Cover the case of \( ... \) -> $ ... $
+    result = result.replace(/\\\((.*?)\\\)/g, '$$$1$');
+    // Cover the case of \[ ... \] -> $$ ... $$
+    result = result.replace(/\\\[(.*?)\\\]/g, '$$$$$1$$$$');
+    return result;
+  };
+
   const stripHtml = (html: string) => {
     if (!html) return '';
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    return doc.body.textContent || "";
+    const cleaned = ensureMathAssetsRendered(html);
+    const doc = new DOMParser().parseFromString(cleaned, 'text/html');
+    
+    // Convert Quill / KaTeX formulas to text: $formula$
+    doc.querySelectorAll('.ql-formula').forEach(el => {
+      const formula = el.getAttribute('data-value');
+      if (formula) {
+        el.textContent = ` $${formula.trim()}$ `;
+      }
+    });
+
+    return convertTexDelimiters(doc.body.textContent || "");
   };
 
   const renderQuestionContentPdf = (doc: jsPDF, q: Question, prefix: string, imageMap: Map<string, string>, startY: number, pageWidth: number) => {
-    const html = q.content || '';
+    const html = ensureMathAssetsRendered(q.content || '');
     const parser = new DOMParser();
     const htmlDoc = parser.parseFromString(html, 'text/html');
     let y = startY;
@@ -1041,7 +2354,20 @@ export default function App() {
       if (y > 250) { doc.addPage(); y = 20; }
       y = renderQuestionContentPdf(doc, q, `Cau ${i + 1}: `, imageMap, y, pageWidth);
       
-      const options = `A. ${removeAccents(q.option_a)}   B. ${removeAccents(q.option_b)}   C. ${removeAccents(q.option_c)}   D. ${removeAccents(q.option_d)}`;
+      const optA = q.shuffled_options && q.shuffled_options.length > 0
+        ? q.shuffled_options.find(o => o.label === 'A')?.text || ''
+        : q.option_a || '';
+      const optB = q.shuffled_options && q.shuffled_options.length > 0
+        ? q.shuffled_options.find(o => o.label === 'B')?.text || ''
+        : q.option_b || '';
+      const optC = q.shuffled_options && q.shuffled_options.length > 0
+        ? q.shuffled_options.find(o => o.label === 'C')?.text || ''
+        : q.option_c || '';
+      const optD = q.shuffled_options && q.shuffled_options.length > 0
+        ? q.shuffled_options.find(o => o.label === 'D')?.text || ''
+        : q.option_d || '';
+
+      const options = `A. ${removeAccents(stripHtml(optA))}   B. ${removeAccents(stripHtml(optB))}   C. ${removeAccents(stripHtml(optC))}   D. ${removeAccents(stripHtml(optD))}`;
       doc.text(options, 35, y);
       y += 10;
     }
@@ -1057,10 +2383,10 @@ export default function App() {
       if (y > 230) { doc.addPage(); y = 20; }
       y = renderQuestionContentPdf(doc, q, `Cau ${i + 1}: `, imageMap, y, pageWidth);
       
-      doc.text(`a) ${removeAccents(q.option_a)}`, 40, y); y += 6;
-      doc.text(`b) ${removeAccents(q.option_b)}`, 40, y); y += 6;
-      doc.text(`c) ${removeAccents(q.option_c)}`, 40, y); y += 6;
-      doc.text(`d) ${removeAccents(q.option_d)}`, 40, y); y += 8;
+      doc.text(`a) ${removeAccents(stripHtml(q.option_a))}`, 40, y); y += 6;
+      doc.text(`b) ${removeAccents(stripHtml(q.option_b))}`, 40, y); y += 6;
+      doc.text(`c) ${removeAccents(stripHtml(q.option_c))}`, 40, y); y += 6;
+      doc.text(`d) ${removeAccents(stripHtml(q.option_d))}`, 40, y); y += 8;
     }
 
     // Part III
@@ -1233,6 +2559,24 @@ export default function App() {
                 </div>
               </header>
 
+              <div className="bg-blue-50/60 border border-blue-100 rounded-2xl p-4 flex gap-4 text-sm text-slate-700">
+                <div className="w-10 h-10 rounded-xl bg-blue-100 flex items-center justify-center flex-shrink-0 text-blue-600">
+                  <Sparkles size={20} />
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-800 mb-1 text-xs sm:text-sm">Mẹo hiển thị công thức môn Toán (MathType, Equation, LaTeX)</h4>
+                  <p className="leading-relaxed text-slate-600 text-xs text-[11px] sm:text-xs">
+                    Để các công thức toán học hiển thị trực quan dạng Vector sắc nét, hệ thống tự động quét và vẽ các định dạng <strong>MathML</strong> và <strong>LaTeX/TeX</strong>.
+                  </p>
+                  <p className="leading-relaxed text-slate-600 text-xs text-[11px] sm:text-xs mt-1">
+                    • <strong>Đề thi từ Word:</strong> Thầy cô nên sử dụng tính năng <strong>Convert Equations</strong> hoặc <strong>Toggle TeX</strong> trong công cụ MathType (Word) để đổi toàn bộ công thức sang dạng ký hiệu LaTeX (như <code className="bg-blue-100 px-1 py-0.5 rounded border border-blue-200 font-mono text-[10px] text-blue-700">$x^2 - 2x + 1 = 0$</code>) trước khi lưu và upload.
+                  </p>
+                  <p className="leading-relaxed text-slate-600 text-xs text-[11px] sm:text-xs mt-0.5">
+                    • <strong>Nhập trực tiếp:</strong> Sử dụng phím công thức <code className="bg-blue-100 px-1 py-0.5 rounded border border-blue-200 font-bold text-[10px] text-blue-700">Formula</code> trong khung soạn thảo để dễ dàng nhập phương trình toán học chuẩn xác nhất.
+                  </p>
+                </div>
+              </div>
+
               <div className="card p-4 flex flex-wrap gap-4 items-center">
                 <div className="relative flex-1 min-w-[300px]">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -1323,7 +2667,10 @@ export default function App() {
                                 />
                               </div>
                             )}
-                            <p className="text-sm font-medium text-slate-700 line-clamp-2">{stripHtml(q.content)}</p>
+                            <div 
+                              className="text-sm font-medium text-slate-700 line-clamp-2 max-h-12 overflow-hidden select-text ql-editor-mini" 
+                              dangerouslySetInnerHTML={{ __html: ensureMathAssetsRendered(q.content) }} 
+                            />
                           </div>
                         </td>
                         <td className="px-6 py-4">
@@ -1920,7 +3267,7 @@ export default function App() {
                         {...({
                           ref: quillRef,
                           theme: "snow",
-                          value: currentQuestion.content || '',
+                          value: ensureMathAssetsRendered(currentQuestion.content || ''),
                           onChange: (content: string) => setCurrentQuestion(prev => ({ ...prev, content })),
                           modules: modules,
                           className: "h-64 mb-12"

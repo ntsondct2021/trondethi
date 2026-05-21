@@ -33,7 +33,8 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: "100mb" }));
+  app.use(express.urlencoded({ limit: "100mb", extended: true }));
   app.use("/uploads", express.static("uploads"));
 
   // Database setup
@@ -61,6 +62,15 @@ async function startServer() {
       total_questions INTEGER NOT NULL,
       difficulty_config TEXT, -- JSON string
       topic_config TEXT -- JSON string
+    );
+
+    CREATE TABLE IF NOT EXISTS math_assets (
+      id TEXT PRIMARY KEY,
+      original_xml TEXT NOT NULL,
+      ole_bin_base64 TEXT,
+      image_bin_base64 TEXT,
+      image_ext TEXT,
+      latex_fallback TEXT
     );
   `);
 
@@ -167,6 +177,107 @@ async function startServer() {
     }
     const url = `/uploads/${req.file.filename}`;
     res.json({ url });
+  });
+
+  // Math Assets Endpoints
+  app.post("/api/math-assets", (req, res) => {
+    try {
+      const assets = req.body;
+      if (!Array.isArray(assets)) {
+        return res.status(400).json({ error: "Invalid body, expected array" });
+      }
+      const insert = db.prepare(`
+        INSERT OR REPLACE INTO math_assets (id, original_xml, ole_bin_base64, image_bin_base64, image_ext, latex_fallback)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const insertMany = db.transaction((list) => {
+        for (const item of list) {
+          insert.run(
+            item.id,
+            item.originalXml,
+            item.oleBinBase64 || null,
+            item.imageBinBase64 || null,
+            item.imageExt || null,
+            item.latexFallback || null
+          );
+        }
+      });
+      insertMany(assets);
+      res.json({ success: true, count: assets.length });
+    } catch (error) {
+      console.error("Error saving math assets:", error);
+      res.status(500).json({ error: "Failed to save math assets" });
+    }
+  });
+
+  app.get("/api/math-assets/:id", (req, res) => {
+    try {
+      const asset = db.prepare("SELECT * FROM math_assets WHERE id = ?").get(req.params.id);
+      if (!asset) {
+        return res.status(404).json({ error: "Asset not found" });
+      }
+      res.json({
+        id: asset.id,
+        originalXml: asset.original_xml,
+        oleBinBase64: asset.ole_bin_base64,
+        imageBinBase64: asset.image_bin_base64,
+        imageExt: asset.image_ext,
+        latexFallback: asset.latex_fallback
+      });
+    } catch (error) {
+      console.error("Error fetching math asset:", error);
+      res.status(500).json({ error: "Failed to get math asset" });
+    }
+  });
+
+  app.get("/api/math-assets/:id/image", (req, res) => {
+    try {
+      const asset = db.prepare("SELECT image_bin_base64, image_ext FROM math_assets WHERE id = ?").get(req.params.id);
+      if (!asset || !asset.image_bin_base64) {
+        return res.status(404).send("Not found");
+      }
+      const buffer = Buffer.from(asset.image_bin_base64, "base64");
+      const ext = (asset.image_ext || "png").toLowerCase();
+      let contentType = "image/png";
+      if (ext === "wmf") contentType = "image/x-wmf";
+      else if (ext === "emf") contentType = "image/x-emf";
+      else if (ext === "gif") contentType = "image/gif";
+      else if (ext === "jpg" || ext === "jpeg") contentType = "image/jpeg";
+
+      res.setHeader("Content-Type", contentType);
+      res.end(buffer);
+    } catch (error) {
+      console.error("Error serving asset image:", error);
+      res.status(500).send("Server error");
+    }
+  });
+
+  app.post("/api/math-assets/get-bulk", (req, res) => {
+    try {
+      const { ids } = req.body;
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.json([]);
+      }
+      const stmt = db.prepare("SELECT * FROM math_assets WHERE id = ?");
+      const results: any[] = [];
+      for (const id of ids) {
+        const asset = stmt.get(id);
+        if (asset) {
+          results.push({
+            id: asset.id,
+            originalXml: asset.original_xml,
+            oleBinBase64: asset.ole_bin_base64,
+            imageBinBase64: asset.image_bin_base64,
+            imageExt: asset.image_ext,
+            latexFallback: asset.latex_fallback
+          });
+        }
+      }
+      res.json(results);
+    } catch (error) {
+      console.error("Error fetching bulk math assets:", error);
+      res.status(500).json({ error: "Failed to fetch math assets" });
+    }
   });
 
   // Vite middleware for development

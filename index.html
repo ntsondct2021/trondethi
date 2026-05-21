@@ -1,10 +1,33 @@
 <!doctype html>
-<html lang="vi">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Language" content="vi" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Phần mềm trộn đề thi</title>
+    <title>Hệ Thống Trộn Đề Thi 3 Phân Khúc</title>
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']],
+          processEscapes: true
+        },
+        options: {
+          ignoreHtmlClass: 'tex2jax_ignore',
+          processHtmlClass: 'tex2jax_process'
+        },
+        startup: {
+          pageReady: () => {
+            return MathJax.startup.defaultPageReady();
+          }
+        }
+      };
+    </script>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    
+    <!-- KaTeX for ReactQuill formula editor support -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
   </head>
   <body>
     <div id="root"></div>
