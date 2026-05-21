@@ -2654,9 +2654,9 @@ export default function App() {
       {/* Sidebar */}
       <div className="w-64 bg-white border-r border-slate-200 flex flex-col p-4">
         <div className="flex items-center gap-2 px-2 mb-8">
-          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white font-bold text-xl">M</div>
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white font-bold text-xl">T</div>
           <div>
-            <h1 className="font-bold text-slate-800 leading-tight">McMix Pro</h1>
+            <h1 className="font-bold text-slate-800 leading-tight">TinHoc DCT</h1>
             <p className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">TN THPT 2025</p>
           </div>
         </div>
