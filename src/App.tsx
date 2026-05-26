@@ -246,13 +246,27 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer | Uint8Array): string => {
 };
 
 const base64ToUint8Array = (base64: string): Uint8Array => {
-  const binaryString = window.atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  try {
+    let decoded = base64;
+    if (base64.includes('%')) {
+      try {
+        decoded = decodeURIComponent(base64);
+      } catch (uriErr) {
+        console.warn("Could not decode URI components of base64:", uriErr);
+      }
+    }
+    const cleanBase64 = decoded.replace(/[^A-Za-z0-9+/=]/g, "");
+    const binaryString = window.atob(cleanBase64);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (err) {
+    console.error("Failed to convert base64 to Uint8Array:", err);
+    return new Uint8Array(0);
   }
-  return bytes;
 };
 
 const preprocessDocx = async (arrayBuffer: ArrayBuffer): Promise<ArrayBuffer> => {
@@ -825,7 +839,13 @@ const postprocessMathAssetsInDocx = async (shuffledBlob: Blob, exam: GeneratedEx
     }
 
     // Replace the text run rNode with the exact imported assetNode
-    rNode.parentNode?.replaceChild(finalNodeToInsert, rNode);
+    try {
+      if (rNode.parentNode) {
+        rNode.parentNode.replaceChild(finalNodeToInsert, rNode);
+      }
+    } catch (replaceErr) {
+      console.warn("Could not replace run node in DOM:", replaceErr);
+    }
   }
 
   // Serialize and write back document.xml
@@ -1423,87 +1443,307 @@ export default function App() {
     reader.onload = async (evt) => {
       let arrayBuffer = evt.target?.result as ArrayBuffer;
       try {
-        // Run preprocessing on Word document to parse internal Office Math / MathType XML XML structures to LaTeX $ ... $ delimiters
+        // Run preprocessing on Word document to parse internal Office Math / MathType XML structures to LaTeX placeholders
         try {
           arrayBuffer = await preprocessDocx(arrayBuffer);
         } catch (mathErr) {
           console.error("Math preprocessing failed, using original document:", mathErr);
         }
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        const text = result.value;
-        
-        // Simple parsing logic for Word format
-        // Expected format:
-        // Câu 1: Content...
-        // A. Option A
-        // B. Option B
-        // C. Option C
-        // D. Option D
-        // Đáp án: A
-        
-        const questionBlocks = text.split(/Câu \d+[:.]/i).filter(block => block.trim() !== '');
-        const parsedQuestions = questionBlocks.map(block => {
-          const lines = block.split('\n').map(l => l.trim()).filter(l => l !== '');
-          
-          let content = '';
-          let a = '', b = '', c = '', d = '', ans = '';
-          let topic = 'Nhập từ Word', diff = 'Trung bình', expl = '', imgUrl = '';
-          let type: QuestionType = 'SINGLE_CHOICE';
-          
-          let currentPart = 'content';
-          
-          lines.forEach(line => {
-            const lowerLine = line.toLowerCase();
-            if (line.startsWith('A.')) { a = line.substring(2).trim(); currentPart = 'a'; }
-            else if (line.startsWith('B.')) { b = line.substring(2).trim(); currentPart = 'b'; }
-            else if (line.startsWith('C.')) { c = line.substring(2).trim(); currentPart = 'c'; }
-            else if (line.startsWith('D.')) { d = line.substring(2).trim(); currentPart = 'd'; }
-            else if (line.startsWith('a)')) { a = line.substring(2).trim(); currentPart = 'a'; type = 'TRUE_FALSE'; }
-            else if (line.startsWith('b)')) { b = line.substring(2).trim(); currentPart = 'b'; type = 'TRUE_FALSE'; }
-            else if (line.startsWith('c)')) { c = line.substring(2).trim(); currentPart = 'c'; type = 'TRUE_FALSE'; }
-            else if (line.startsWith('d)')) { d = line.substring(2).trim(); currentPart = 'd'; type = 'TRUE_FALSE'; }
-            else if (lowerLine.startsWith('đáp án:') || lowerLine.startsWith('dap an:')) {
-              ans = line.split(':')[1]?.trim() || '';
-              currentPart = 'ans';
-            }
-            else if (lowerLine.startsWith('môn học:') || lowerLine.startsWith('mon hoc:') || lowerLine.startsWith('chuyên đề:') || lowerLine.startsWith('chuyen de:')) {
-              topic = line.split(':')[1]?.trim() || 'Chưa phân loại';
-              currentPart = 'topic';
-            }
-            else if (lowerLine.startsWith('độ khó:') || lowerLine.startsWith('do kho:')) {
-              diff = line.split(':')[1]?.trim() || 'Trung bình';
-              currentPart = 'diff';
-            }
-            else if (lowerLine.startsWith('hình ảnh:') || lowerLine.startsWith('hinh anh:') || lowerLine.startsWith('image:')) {
-              imgUrl = line.split(':')[1]?.trim() || '';
-            }
-            else if (lowerLine.startsWith('lời giải:') || lowerLine.startsWith('loi giai:')) {
-              expl = line.split(':')[1]?.trim() || '';
-              currentPart = 'expl';
-            }
-            else {
-              if (currentPart === 'content') content += ' ' + line;
-              else if (currentPart === 'a') a += ' ' + line;
-              else if (currentPart === 'b') b += ' ' + line;
-              else if (currentPart === 'c') c += ' ' + line;
-              else if (currentPart === 'd') d += ' ' + line;
-              else if (currentPart === 'expl') expl += ' ' + line;
-            }
-          });
 
-          // Infer type if not already set
-          if (type === 'SINGLE_CHOICE' && !a && !b && !c && !d) {
+        // Convert key DOCX XML structures to fully valid HTML to preserve tables and other layout properties
+        const result = await mammoth.convertToHtml({ arrayBuffer });
+        const html = result.value;
+
+        const domParser = new DOMParser();
+        const docNode = domParser.parseFromString(html, 'text/html');
+
+        const isQuestionStart = (el: Element): boolean => {
+          const text = (el.textContent || '').trim();
+          return /^(C[a\u00e2]u)\s+\d+[:.\s-]/i.test(text);
+        };
+
+        const isPartHeader = (el: Element): boolean => {
+          const text = (el.textContent || '').trim().toLowerCase();
+          return text.startsWith('ph\u1ea7n ') || text.startsWith('phan ');
+        };
+
+        const questionBlocks: Element[][] = [];
+        let currentBlock: Element[] = [];
+
+        Array.from(docNode.body.children).forEach(el => {
+          if (isQuestionStart(el)) {
+            if (currentBlock.length > 0) {
+              questionBlocks.push(currentBlock);
+            }
+            currentBlock = [el];
+          } else if (isPartHeader(el)) {
+            if (currentBlock.length > 0) {
+              questionBlocks.push(currentBlock);
+            }
+            currentBlock = [];
+          } else {
+            if (currentBlock.length > 0) {
+              currentBlock.push(el);
+            }
+          }
+        });
+        if (currentBlock.length > 0) {
+          questionBlocks.push(currentBlock);
+        }
+
+        const stripQuestionPrefixFromHtml = (htmlStr: string): string => {
+          const temp = document.createElement('div');
+          temp.innerHTML = htmlStr;
+          
+          const walker = document.createTreeWalker(temp, NodeFilter.SHOW_TEXT, null);
+          const firstTextNode = walker.nextNode();
+          if (firstTextNode && firstTextNode.textContent) {
+            const original = firstTextNode.textContent;
+            const cleaned = original.replace(/^(C[a\u00e2]u)\s+\d+[:.\s-]+\s*/i, '');
+            firstTextNode.textContent = cleaned;
+          }
+          return temp.innerHTML;
+        };
+
+        const stripOptionPrefixFromHtml = (htmlStr: string, prefixRegex: RegExp): string => {
+          const temp = document.createElement('div');
+          temp.innerHTML = htmlStr;
+          
+          const walker = document.createTreeWalker(temp, NodeFilter.SHOW_TEXT, null);
+          const firstTextNode = walker.nextNode();
+          if (firstTextNode && firstTextNode.textContent) {
+            const original = firstTextNode.textContent;
+            const cleaned = original.replace(prefixRegex, '');
+            firstTextNode.textContent = cleaned;
+          }
+          return temp.innerHTML;
+        };
+
+        const isOptionA = (t: string) => /^[A\u1ea2][.)\s-]/.test(t);
+        const isOptionB = (t: string) => /^B[.)\s-]/.test(t);
+        const isOptionC = (t: string) => /^C[.)\s-]/.test(t);
+        const isOptionD = (t: string) => /^D[.)\s-]/.test(t);
+
+        const isSubOptionA = (t: string) => /^a[)\s.-]/.test(t);
+        const isSubOptionB = (t: string) => /^b[)\s.-]/.test(t);
+        const isSubOptionC = (t: string) => /^c[)\s.-]/.test(t);
+        const isSubOptionD = (t: string) => /^d[)\s.-]/.test(t);
+
+        const optARegexClean = /^[A\u1ea2][.)\s-]+\s*/;
+        const optBRegexClean = /^B[.)\s-]+\s*/;
+        const optCRegexClean = /^C[.)\s-]+\s*/;
+        const optDRegexClean = /^D[.)\s-]+\s*/;
+
+        const subOptARegexClean = /^a[)\s.-]+\s*/;
+        const subOptBRegexClean = /^b[)\s.-]+\s*/;
+        const subOptCRegexClean = /^c[)\s.-]+\s*/;
+        const subOptDRegexClean = /^d[)\s.-]+\s*/;
+
+        const hasAllFourOptions = (t: string): boolean => {
+          return /^[A\u1ea2][.)\s-].*?B[.)\s-].*?C[.)\s-].*?D[.)\s-]/.test(t) ||
+                 /^[a][)\s.-].*?b[)\s.-].*?c[)\s.-].*?d[)\s.-]/.test(t);
+        };
+
+        const parseAllFourOptions = (htmlStr: string, isTrueFalse = false): { a: string, b: string, c: string, d: string } | null => {
+          const temp = document.createElement('div');
+          temp.innerHTML = htmlStr;
+          const text = temp.textContent || '';
+          
+          const delimiterRegex = isTrueFalse 
+            ? /[\s\t\n](?=[b-d][)\s.-])/ 
+            : /[\s\t\n](?=[B-D][.)\s-])/;
+            
+          const parts = text.split(delimiterRegex);
+          if (parts.length >= 4) {
+            let aText = parts[0].replace(isTrueFalse ? subOptARegexClean : optARegexClean, '').trim();
+            let bText = '', cText = '', dText = '';
+            parts.slice(1).forEach(p => {
+              const trimmed = p.trim();
+              const marker = isTrueFalse ? /^[b-d][)\s.-]/i : /^[B-D][.)\s-]/i;
+              const cleanMarker = isTrueFalse 
+                ? (trimmed.startsWith('b') ? subOptBRegexClean : (trimmed.startsWith('c') ? subOptCRegexClean : subOptDRegexClean))
+                : (trimmed.startsWith('B') ? optBRegexClean : (trimmed.startsWith('C') ? optCRegexClean : optDRegexClean));
+              if (marker.test(trimmed)) {
+                const val = trimmed.replace(cleanMarker, '').trim();
+                if (isTrueFalse) {
+                  if (trimmed.startsWith('b')) bText = val;
+                  else if (trimmed.startsWith('c')) cText = val;
+                  else if (trimmed.startsWith('d')) dText = val;
+                } else {
+                  if (trimmed.startsWith('B')) bText = val;
+                  else if (trimmed.startsWith('C')) cText = val;
+                  else if (trimmed.startsWith('D')) dText = val;
+                }
+              }
+            });
+            return { a: aText, b: bText, c: cText, d: dText };
+          }
+          return null;
+        };
+
+        const convertHtmlWithFormulas = (htmlStr: string): string => {
+          if (!htmlStr) return '';
+          let result = htmlStr;
+          
+          result = ensureMathAssetsRendered(result);
+          
+          result = result.replace(/\$\$(.*?)\$\$/gs, (_, formula) => {
+            const trimmed = formula.trim();
+            return `<span class="ql-formula" data-value="${trimmed}">\\(${trimmed}\\)</span>`;
+          });
+          
+          result = result.replace(/\$([^\$]+?)\$/g, (_, formula) => {
+            const trimmed = formula.trim();
+            return `<span class="ql-formula" data-value="${trimmed}">\\(${trimmed}\\)</span>`;
+          });
+          
+          return result;
+        };
+
+        const parsedQuestions = questionBlocks.map(block => {
+          if (block.length === 0) return null;
+          
+          let type: QuestionType = 'SINGLE_CHOICE';
+          let contentHtml = '';
+          let aHtml = '';
+          let bHtml = '';
+          let cHtml = '';
+          let dHtml = '';
+          let ans = '';
+          let topic = 'Nhập từ Word';
+          let diff = 'Trung bình';
+          let expl = '';
+          let imgUrl = '';
+          
+          let state: 'content' | 'a' | 'b' | 'c' | 'd' | 'ans' | 'topic' | 'diff' | 'expl' = 'content';
+          
+          // Process first element (the question stem)
+          let firstEl = block[0];
+          let firstElHtml = stripQuestionPrefixFromHtml(firstEl.outerHTML);
+          
+          const strippedFirstText = stripHtml(firstElHtml).trim();
+          if (hasAllFourOptions(strippedFirstText)) {
+            const splitMarker = /[\s\t\n]+(?=[Aa\u1ea2][.)\s-])/;
+            const parts = strippedFirstText.split(splitMarker);
+            const mainContent = parts[0].trim();
+            contentHtml = `<div>${mainContent}</div>`;
+            
+            const optionsPart = strippedFirstText.substring(strippedFirstText.search(/[Aa\u1ea2][.)\s-]/));
+            const parsed = parseAllFourOptions(optionsPart, /^[a][)\s.-]/.test(optionsPart));
+            if (parsed) {
+              aHtml = parsed.a;
+              bHtml = parsed.b;
+              cHtml = parsed.c;
+              dHtml = parsed.d;
+              type = /^[a][)\s.-]/.test(optionsPart) ? 'TRUE_FALSE' : 'SINGLE_CHOICE';
+              state = 'd';
+            }
+          } else {
+            contentHtml = firstElHtml;
+            state = 'content';
+          }
+          
+          // Process remaining elements in the question block
+          for (let k = 1; k < block.length; k++) {
+            let el = block[k];
+            const text = (el.textContent || '').trim();
+            const lowerText = text.toLowerCase();
+            
+            if (lowerText.startsWith('đáp án:') || lowerText.startsWith('dap an:')) {
+              ans = el.textContent.split(':')[1]?.trim() || '';
+              state = 'ans';
+            } else if (lowerText.startsWith('môn học:') || lowerText.startsWith('mon hoc:') || lowerText.startsWith('chuyên đề:') || lowerText.startsWith('chuyen de:')) {
+              topic = el.textContent.split(':')[1]?.trim() || 'Nhập từ Word';
+              state = 'topic';
+            } else if (lowerText.startsWith('độ khó:') || lowerText.startsWith('do kho:')) {
+              diff = el.textContent.split(':')[1]?.trim() || 'Trung bình';
+              state = 'diff';
+            } else if (lowerText.startsWith('hình ảnh:') || lowerText.startsWith('hinh anh:') || lowerText.startsWith('image:')) {
+              imgUrl = el.textContent.split(':')[1]?.trim() || '';
+            } else if (lowerText.startsWith('lời giải:') || lowerText.startsWith('loi giai:')) {
+              expl = el.innerHTML.includes(':') ? el.innerHTML.substring(el.innerHTML.indexOf(':') + 1) : el.innerHTML;
+              state = 'expl';
+            } else if (isOptionA(text)) {
+              type = 'SINGLE_CHOICE';
+              state = 'a';
+              if (hasAllFourOptions(text)) {
+                const parsed = parseAllFourOptions(el.innerHTML);
+                if (parsed) {
+                  aHtml = parsed.a;
+                  bHtml = parsed.b;
+                  cHtml = parsed.c;
+                  dHtml = parsed.d;
+                  state = 'd';
+                } else {
+                  aHtml = stripOptionPrefixFromHtml(el.outerHTML, optARegexClean);
+                }
+              } else {
+                aHtml = stripOptionPrefixFromHtml(el.outerHTML, optARegexClean);
+              }
+            } else if (isOptionB(text)) {
+              state = 'b';
+              bHtml = stripOptionPrefixFromHtml(el.outerHTML, optBRegexClean);
+            } else if (isOptionC(text)) {
+              state = 'c';
+              cHtml = stripOptionPrefixFromHtml(el.outerHTML, optCRegexClean);
+            } else if (isOptionD(text)) {
+              state = 'd';
+              dHtml = stripOptionPrefixFromHtml(el.outerHTML, optDRegexClean);
+            } else if (isSubOptionA(text)) {
+              type = 'TRUE_FALSE';
+              state = 'a';
+              if (hasAllFourOptions(text)) {
+                const parsed = parseAllFourOptions(el.innerHTML, true);
+                if (parsed) {
+                  aHtml = parsed.a;
+                  bHtml = parsed.b;
+                  cHtml = parsed.c;
+                  dHtml = parsed.d;
+                  state = 'd';
+                } else {
+                  aHtml = stripOptionPrefixFromHtml(el.outerHTML, subOptARegexClean);
+                }
+              } else {
+                aHtml = stripOptionPrefixFromHtml(el.outerHTML, subOptARegexClean);
+              }
+            } else if (isSubOptionB(text)) {
+              state = 'b';
+              bHtml = stripOptionPrefixFromHtml(el.outerHTML, subOptBRegexClean);
+            } else if (isSubOptionC(text)) {
+              state = 'c';
+              cHtml = stripOptionPrefixFromHtml(el.outerHTML, subOptCRegexClean);
+            } else if (isSubOptionD(text)) {
+              state = 'd';
+              dHtml = stripOptionPrefixFromHtml(el.outerHTML, subOptDRegexClean);
+            } else {
+              const elHtml = el.outerHTML;
+              if (state === 'content') {
+                contentHtml += elHtml;
+              } else if (state === 'a') {
+                aHtml += elHtml;
+              } else if (state === 'b') {
+                bHtml += elHtml;
+              } else if (state === 'c') {
+                cHtml += elHtml;
+              } else if (state === 'd') {
+                dHtml += elHtml;
+              } else if (state === 'expl') {
+                expl += elHtml;
+              }
+            }
+          }
+          
+          if (type === 'SINGLE_CHOICE' && !aHtml && !bHtml && !cHtml && !dHtml) {
             type = 'SHORT_ANSWER';
           }
           
-          const finalContent = convertRawTextToHtmlWithFormulas(content.trim());
-          const finalA = convertRawTextToHtmlWithFormulas(a.trim());
-          const finalB = convertRawTextToHtmlWithFormulas(b.trim());
-          const finalC = convertRawTextToHtmlWithFormulas(c.trim());
-          const finalD = convertRawTextToHtmlWithFormulas(d.trim());
-          const finalExpl = convertRawTextToHtmlWithFormulas(expl.trim());
-
-          // Populate image_url automatically with first inline image from question's content
+          const finalContent = convertHtmlWithFormulas(contentHtml.trim());
+          const finalA = convertHtmlWithFormulas(aHtml.trim());
+          const finalB = convertHtmlWithFormulas(bHtml.trim());
+          const finalC = convertHtmlWithFormulas(cHtml.trim());
+          const finalD = convertHtmlWithFormulas(dHtml.trim());
+          const finalExpl = convertHtmlWithFormulas(expl.trim());
+          
           let finalImgUrl = imgUrl;
           if (!finalImgUrl && finalContent) {
             const parser = new DOMParser();
@@ -1516,7 +1756,7 @@ export default function App() {
               }
             }
           }
-
+          
           return {
             type,
             content: finalContent,
@@ -1530,7 +1770,7 @@ export default function App() {
             image_url: finalImgUrl,
             explanation: finalExpl
           };
-        }).filter(q => q.content !== '');
+        }).filter(q => q !== null && q.content !== '');
 
         if (parsedQuestions.length > 0) {
           setLoading(true);
@@ -1544,8 +1784,6 @@ export default function App() {
         }
       } catch (err) {
         console.error('Error parsing Word file:', err);
-        // alert is discouraged, but for now we'll keep it or use a toast if we had one.
-        // Actually, let's just console.error for now or use a custom modal for errors later.
       }
     };
     reader.readAsArrayBuffer(file);
@@ -1745,24 +1983,49 @@ export default function App() {
 
   const fetchImageAsBuffer = async (url: string): Promise<Uint8Array | null> => {
     try {
+      if (!url) return null;
       if (url.startsWith('data:')) {
         const parts = url.split(',');
         if (parts.length > 1) {
           return base64ToUint8Array(parts[1]);
         }
       }
-      const response = await fetch(url);
+
+      let fetchUrl = url;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        const slashUrl = url.startsWith('/') ? url : '/' + url;
+        fetchUrl = window.location.origin + slashUrl;
+      }
+
+      const response = await fetch(fetchUrl);
+      if (!response.ok) {
+        console.warn(`Could not fetch image from ${fetchUrl}: status ${response.status}`);
+        return null; // Don't return corrupted status page bytes
+      }
       const buffer = await response.arrayBuffer();
       return new Uint8Array(buffer);
     } catch (error) {
-      console.error('Error fetching image:', error);
+      console.error('Error fetching image:', error, 'URL:', url);
       return null;
     }
   };
 
   const fetchImageAsBase64 = async (url: string): Promise<string | null> => {
     try {
-      const response = await fetch(url);
+      if (!url) return null;
+      if (url.startsWith('data:')) return url;
+
+      let fetchUrl = url;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        const slashUrl = url.startsWith('/') ? url : '/' + url;
+        fetchUrl = window.location.origin + slashUrl;
+      }
+
+      const response = await fetch(fetchUrl);
+      if (!response.ok) {
+        console.warn(`Could not fetch image as base64 from ${fetchUrl}: status ${response.status}`);
+        return null;
+      }
       const blob = await response.blob();
       return new Promise((resolve) => {
         const reader = new FileReader();
@@ -1770,7 +2033,7 @@ export default function App() {
         reader.readAsDataURL(blob);
       });
     } catch (error) {
-      console.error('Error fetching image as base64:', error);
+      console.error('Error fetching image as base64:', error, 'URL:', url);
       return null;
     }
   };
@@ -1811,8 +2074,15 @@ export default function App() {
 
     const process = (node: Node) => {
       if (node.nodeType === Node.TEXT_NODE) {
-        if (node.textContent && node.textContent.trim()) {
-          children.push(new TextRun({ text: convertTexDelimiters(node.textContent) }));
+        const text = node.textContent;
+        if (text) {
+          const hasNonSpace = text.trim().length > 0;
+          const isWhitespaceOnly = text.length > 0 && !hasNonSpace;
+          if (hasNonSpace) {
+            children.push(new TextRun({ text: convertTexDelimiters(text) }));
+          } else if (isWhitespaceOnly && children.length > 0) {
+            children.push(new TextRun({ text: " " }));
+          }
         }
       } else if (node instanceof Element && node.classList.contains('ql-formula')) {
         const formula = node.getAttribute('data-value');
@@ -1863,12 +2133,21 @@ export default function App() {
 
     const processNode = (node: Node) => {
       if (node.nodeType === Node.TEXT_NODE) {
-        if (node.textContent && node.textContent.trim()) {
-          if (isFirst) {
-            currentRuns.push(new TextRun({ text: prefix, bold: true }));
-            isFirst = false;
+        const text = node.textContent;
+        if (text) {
+          const hasNonSpace = text.trim().length > 0;
+          const isWhitespaceOnly = text.length > 0 && !hasNonSpace;
+          if (hasNonSpace) {
+            if (isFirst) {
+              currentRuns.push(new TextRun({ text: prefix, bold: true }));
+              isFirst = false;
+            }
+            currentRuns.push(new TextRun({ text: convertTexDelimiters(text) }));
+          } else if (isWhitespaceOnly) {
+            if (currentRuns.length > 0) {
+              currentRuns.push(new TextRun({ text: " " }));
+            }
           }
-          currentRuns.push(new TextRun({ text: convertTexDelimiters(node.textContent) }));
         }
       } else if (node instanceof Element && node.classList.contains('ql-formula')) {
         const formula = node.getAttribute('data-value');
@@ -1922,12 +2201,63 @@ export default function App() {
           paragraphs.push(new Paragraph({ children: currentRuns, spacing: { before: 100 } }));
           currentRuns = [];
         }
+      } else if (node.nodeName === 'TABLE') {
+        if (currentRuns.length > 0) {
+          paragraphs.push(new Paragraph({ children: currentRuns, spacing: { before: 100 } }));
+          currentRuns = [];
+        }
+        
+        const tableNode = node as Element;
+        const trNodes = Array.from(tableNode.querySelectorAll('tr'));
+        const maxCols = Math.max(...trNodes.map(tr => tr.querySelectorAll('td, th').length), 1);
+        const cellWidthPercent = 100 / maxCols;
+
+        const cellBorders = {
+          top: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+          bottom: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+          left: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+          right: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+        };
+
+        const rows = trNodes.map(tr => {
+          const cells = Array.from(tr.querySelectorAll('td, th')).map(cell => {
+            const cellRuns = renderHtmlToParagraphChildren(cell.innerHTML, imageMap);
+            return new TableCell({
+              width: { size: cellWidthPercent, type: WidthType.PERCENTAGE },
+              borders: cellBorders,
+              children: [new Paragraph({ children: cellRuns })]
+            });
+          });
+          if (cells.length === 0) return null;
+          return new TableRow({ children: cells });
+        }).filter((r): r is TableRow => r !== null);
+
+        if (rows.length > 0) {
+          paragraphs.push(new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            alignment: AlignmentType.CENTER,
+            borders: {
+              top: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+              bottom: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+              left: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+              right: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+              insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+              insideVertical: { style: BorderStyle.SINGLE, size: 4, color: "CCCCCC" },
+            },
+            rows: rows
+          }));
+        }
       } else {
         node.childNodes.forEach(processNode);
       }
     };
 
     processNode(doc.body);
+
+    if (isFirst) {
+      currentRuns.unshift(new TextRun({ text: prefix, bold: true }));
+      isFirst = false;
+    }
 
     if (currentRuns.length > 0) {
       paragraphs.push(new Paragraph({ children: currentRuns, spacing: { before: 100 } }));
@@ -2316,6 +2646,11 @@ export default function App() {
     result = result.replace(/\[!m:(mathtype_[^\]]+?)\]/g, (_, assetId) => {
       return `<img class="inline-math-asset" src="/api/math-assets/${assetId}/image" alt="${assetId}" style="max-height: 2.2em; vertical-align: middle; display: inline-block; margin: 0 4px;" referrerPolicy="no-referrer" />`;
     });
+
+    // Replace inline images [!img:...] with real HTML tags so DOMParser and other layout processors work
+    result = result.replace(/\[!img:(data:image\/[^\]]+?)\]/g, (_, dataUrl) => {
+      return `<img src="${dataUrl}" class="inline-block max-w-full my-2 align-middle" style="max-height: 12rem;" />`;
+    });
     
     return result;
   };
@@ -2473,6 +2808,39 @@ export default function App() {
         }
       } else if (['P', 'DIV', 'LI', 'BR'].includes(node.nodeName)) {
         node.childNodes.forEach(processNode);
+      } else if (node.nodeName === 'TABLE') {
+        if (isFirst) {
+          doc.setFont("helvetica", "bold");
+          doc.text(prefix, 20, y);
+          doc.setFont("helvetica", "normal");
+          isFirst = false;
+        }
+        if (y > 230) { doc.addPage(); y = 20; }
+        
+        const rows: any[][] = [];
+        const trElements = Array.from((node as Element).querySelectorAll('tr'));
+        trElements.forEach(tr => {
+          const cells = Array.from(tr.querySelectorAll('td, th')).map(cell => {
+            return removeAccents(cell.textContent || "");
+          });
+          if (cells.length > 0) rows.push(cells);
+        });
+
+        if (rows.length > 0) {
+          try {
+            (doc as any).autoTable({
+              startY: y,
+              body: rows,
+              margin: { left: 35, right: 20 },
+              styles: { fontSize: 9, cellPadding: 2, font: "helvetica" },
+              theme: 'grid'
+            });
+            y = (doc as any).lastAutoTable.finalY + 4;
+          } catch (err) {
+            console.error("Error drawing autotable:", err);
+            y += 10;
+          }
+        }
       } else {
         node.childNodes.forEach(processNode);
       }
