@@ -3044,6 +3044,7 @@ export default function App() {
             <span className="text-xs font-bold text-slate-600">Hệ thống sẵn sàng</span>
           </div>
           <p className="text-[10px] text-slate-400">Phiên bản 2.5.0 (2025 Edition)</p>
+          <p className="text-[10px] text-slate-400">Tác giả: Nguyễn Thanh Sơn </p>
         </div>
       </div>
 
