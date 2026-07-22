@@ -1187,7 +1187,7 @@ export default function App() {
     difficulty_ratios: { 'Dễ': 40, 'Trung bình': 40, 'Khó': 20 },
     topic_distribution: {}
   });
-  const [examCodes, setExamCodes] = useState<string[]>(['101', '102', '103', '104']);
+  const [examCodes, setExamCodes] = useState<string[]>(['1001', '1002', '1003', '1004']);
   const [headerConfig, setHeaderConfig] = useState({
     schoolName: "BỘ GIÁO DỤC VÀ ĐÀO TẠO",
     examName: "KỲ THI TỐT NGHIỆP THPT TỪ NĂM 2025",
@@ -3024,7 +3024,7 @@ export default function App() {
         <div className="flex items-center gap-2 px-2 mb-8">
           <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white font-bold text-xl">T</div>
           <div>
-            <h1 className="font-bold text-slate-800 leading-tight">TinHoc DCT</h1>
+            <h1 className="font-bold text-slate-800 leading-tight">Tinhoc DCT</h1>
             <p className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">TN THPT 2025</p>
           </div>
         </div>
@@ -3044,7 +3044,7 @@ export default function App() {
             <span className="text-xs font-bold text-slate-600">Hệ thống sẵn sàng</span>
           </div>
           <p className="text-[10px] text-slate-400">Phiên bản 2.5.0 (2025 Edition)</p>
-          <p className="text-[10px] text-slate-400">Tác giả: Nguyễn Thanh Sơn </p>
+          <p className="text-[10px] text-slate-400">Tác giả: Nguyễn Thanh Sơn</p>
         </div>
       </div>
 
@@ -3377,13 +3377,33 @@ export default function App() {
                       <label className="block text-sm font-medium text-slate-600 mb-1">Tổng cộng: <span className="font-bold text-primary">{structure.total_questions} câu</span></label>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-slate-600 mb-1">Danh sách mã đề</label>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-sm font-medium text-slate-600">Danh sách mã đề (4 số)</label>
+                        <div className="flex gap-1 text-[11px]">
+                          <button 
+                            type="button"
+                            onClick={() => setExamCodes(['1001', '1002', '1003', '1004'])}
+                            className="text-primary hover:underline font-medium"
+                          >
+                            Tạo 4 mã
+                          </button>
+                          <span className="text-slate-300">|</span>
+                          <button 
+                            type="button"
+                            onClick={() => setExamCodes(['1001', '1002', '1003', '1004', '1005', '1006', '1007', '1008'])}
+                            className="text-primary hover:underline font-medium"
+                          >
+                            Tạo 8 mã
+                          </button>
+                        </div>
+                      </div>
                       <div className="flex flex-wrap gap-2 mb-2">
                         {examCodes.map((code, idx) => (
                           <div key={idx} className="relative group">
                             <input 
                               type="text" 
-                              className="w-20 px-2 py-1 border border-slate-200 rounded text-center font-bold focus:ring-2 focus:ring-primary/20 outline-none"
+                              maxLength={6}
+                              className="w-20 px-2 py-1 border border-slate-200 rounded text-center font-bold focus:ring-2 focus:ring-primary/20 outline-none text-sm"
                               value={code}
                               onChange={(e) => {
                                 const newCodes = [...examCodes];
@@ -3400,13 +3420,20 @@ export default function App() {
                           </div>
                         ))}
                         <button 
-                          onClick={() => setExamCodes([...examCodes, (parseInt(examCodes[examCodes.length - 1] || '100') + 1).toString()])}
+                          onClick={() => {
+                            const lastCode = examCodes[examCodes.length - 1];
+                            const lastNum = lastCode ? parseInt(lastCode, 10) : 1000;
+                            const nextNum = isNaN(lastNum) ? 1001 : lastNum + 1;
+                            const nextCode = nextNum.toString().padStart(4, '0');
+                            setExamCodes([...examCodes, nextCode]);
+                          }}
                           className="w-20 px-2 py-1 border border-dashed border-slate-300 rounded text-slate-400 hover:border-primary hover:text-primary transition-colors flex items-center justify-center"
+                          title="Thêm mã đề mới"
                         >
                           <Plus size={16} />
                         </button>
                       </div>
-                      <p className="text-[10px] text-slate-400 italic">Nhấp vào mã đề để sửa, di chuột để xóa.</p>
+                      <p className="text-[10px] text-slate-400 italic">Nhấp vào từng ô để chỉnh sửa mã đề 4 số, di chuột để xóa.</p>
                     </div>
                   </div>
                 </div>
